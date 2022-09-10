@@ -69,7 +69,13 @@ int main(void) {
   yrc = yh_send_plain_msg(connector, YHC_ECHO, data, data_len, &response_cmd,
                           response, &response_len);
   if (yrc != YHR_SUCCESS) {
-    fprintf(stderr, "Failed to send ECHO command: %s\n", yh_strerror(yrc));
+    fprintf(stderr, "Failed to send ECHO command): %s\n", yh_strerror(yrc));
+    exit(EXIT_FAILURE);
+  }
+
+  if (response_cmd == YHC_ERROR) {
+    fprintf(stderr, "Unable to get echo data: %s (%x)\n",
+            yh_strerror(response[0]), response[0]);
     exit(EXIT_FAILURE);
   }
 
@@ -78,7 +84,10 @@ int main(void) {
   yh_session *session = NULL;
   uint16_t authkey = 1;
   yrc = yh_create_session_derived(connector, authkey, password,
-                                  sizeof(password) - 1, false, &session);
+                                  sizeof(password), false, &session);
+  assert(yrc == YHR_SUCCESS);
+
+  yrc = yh_authenticate_session(session);
   assert(yrc == YHR_SUCCESS);
 
   uint8_t session_id;
@@ -96,6 +105,12 @@ int main(void) {
                            response2, &response2_len);
   if (yrc != YHR_SUCCESS) {
     fprintf(stderr, "Failed to send ECHO command: %s\n", yh_strerror(yrc));
+    exit(EXIT_FAILURE);
+  }
+
+  if (response_cmd == YHC_ERROR) {
+    fprintf(stderr, "Unable to get echo data: %s (%x)\n",
+            yh_strerror(response[0]), response[0]);
     exit(EXIT_FAILURE);
   }
 

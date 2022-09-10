@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 
-#include <ctype.h>
+#include <errno.h>
 #include <string.h>
+#include <limits.h>
 
 #include <openssl/bio.h>
 #include <openssl/evp.h>
@@ -25,7 +26,6 @@
 #include "openssl-compat.h"
 #include "util.h"
 #include "insecure_memzero.h"
-#include "hash.h"
 
 bool set_component(unsigned char *in_ptr, const BIGNUM *bn, int element_len) {
   int real_len = BN_num_bytes(bn);
@@ -34,9 +34,11 @@ bool set_component(unsigned char *in_ptr, const BIGNUM *bn, int element_len) {
     return false;
   }
 
-  memset(in_ptr, 0, (size_t) (element_len - real_len));
+  memset(in_ptr, 0, (size_t)(element_len - real_len));
   in_ptr += element_len - real_len;
-  return BN_bn2bin(bn, in_ptr) > 0;
+  BN_bn2bin(bn, in_ptr);
+
+  return true;
 }
 
 static unsigned const char sha1oid[] = {0x30, 0x21, 0x30, 0x09, 0x06,
@@ -68,9 +70,9 @@ static unsigned const char ed25519private_oid[] = {0x30, 0x2e, 0x02, 0x01,
                                                    0x00, 0x30, 0x05, 0x06,
                                                    0x03, 0x2b, 0x65, 0x70,
                                                    0x04, 0x22, 0x04, 0x20};
-static unsigned const char ed25519public_oid[] = {0x30, 0x2a, 0x30, 0x05,
+static unsigned const char ed25519public_oid[] = {0x30, 0x29, 0x30, 0x05,
                                                   0x06, 0x03, 0x2b, 0x65,
-                                                  0x70, 0x03, 0x21, 0x00};
+                                                  0x70, 0x03, 0x20};
 
 bool read_ed25519_key(uint8_t *in, size_t in_len, uint8_t *out,
                       size_t *out_len) {
@@ -84,18 +86,8 @@ bool read_ed25519_key(uint8_t *in, size_t in_len, uint8_t *out,
   }
 
   int ret;
-  BIO *b64 = NULL;
-  BIO *bio = NULL;
-
-  b64 = BIO_new(BIO_f_base64());
-  if (b64 == NULL) {
-    return false;
-  }
-  bio = BIO_new(BIO_s_mem());
-  if (bio == NULL) {
-    BIO_free_all(b64);
-    return false;
-  }
+  BIO *b64 = BIO_new(BIO_f_base64());
+  BIO *bio = BIO_new(BIO_s_mem());
   BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
   BIO_push(b64, bio);
 
@@ -124,43 +116,8 @@ bool read_ed25519_key(uint8_t *in, size_t in_len, uint8_t *out,
 bool read_private_key(uint8_t *buf, size_t len, yh_algorithm *algo,
                       uint8_t *bytes, size_t *bytes_len, bool internal_repr) {
 
-  size_t out_len = *bytes_len;
-  if (read_ed25519_key(buf, len, bytes, &out_len) == true) {
+  if (read_ed25519_key(buf, len, bytes, bytes_len) == true) {
     *algo = YH_ALGO_EC_ED25519;
-
-    if (internal_repr == true) {
-#if (OPENSSL_VERSION_NUMBER < 0x10101000L) || defined(LIBRESSL_VERSION_NUMBER)
-      return false;
-#else
-      EVP_PKEY *pkey =
-        EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, bytes, out_len);
-      if (pkey == NULL) {
-        return false;
-      }
-
-      size_t public_key_len = 0xff;
-      if (EVP_PKEY_get_raw_public_key(pkey, bytes + 64, &public_key_len) != 1 ||
-          public_key_len != 32) {
-        EVP_PKEY_free(pkey);
-        return false;
-      }
-
-      EVP_PKEY_free(pkey);
-
-      for (uint8_t i = 0; i < 16; i++) {
-        uint8_t tmp = bytes[i];
-        bytes[i] = bytes[31 - i];
-        bytes[31 - i] = tmp;
-      }
-
-      if (hash_bytes(bytes, out_len, _SHA512, bytes, bytes_len) == false) {
-        return false;
-      }
-
-      *bytes_len += public_key_len;
-#endif
-    }
-
     return true;
   }
 
@@ -190,9 +147,6 @@ bool read_private_key(uint8_t *buf, size_t len, yh_algorithm *algo,
   switch (EVP_PKEY_base_id(private_key)) {
     case EVP_PKEY_RSA: {
       rsa = EVP_PKEY_get1_RSA(private_key);
-      if (rsa == NULL) {
-        goto cleanup;
-      }
       unsigned char e[4];
       int size = RSA_size(rsa);
       const BIGNUM *bn_n, *bn_e, *bn_p, *bn_q;
@@ -381,7 +335,6 @@ void format_digest(uint8_t *digest, char *str, uint16_t len) {
 int algo2nid(yh_algorithm algo) {
   switch (algo) {
     case YH_ALGO_EC_P256:
-    case YH_ALGO_EC_P256_YUBICO_AUTHENTICATION:
       return NID_X9_62_prime256v1;
 
     case YH_ALGO_EC_P384:
@@ -411,14 +364,11 @@ int algo2nid(yh_algorithm algo) {
       return NID_brainpoolP512r1;
 #endif
 
-#ifdef NID_ED25519
-    case YH_ALGO_EC_ED25519:
-      return NID_ED25519;
-#endif
-
     default:
       return 0;
   }
+
+  return 0;
 }
 
 bool algo2type(yh_algorithm algorithm, yh_object_type *type) {
@@ -485,7 +435,6 @@ bool algo2type(yh_algorithm algorithm, yh_object_type *type) {
       break;
 
     case YH_ALGO_AES128_YUBICO_AUTHENTICATION:
-    case YH_ALGO_EC_P256_YUBICO_AUTHENTICATION:
       *type = YH_AUTHENTICATION_KEY;
       break;
 
@@ -500,26 +449,27 @@ bool algo2type(yh_algorithm algorithm, yh_object_type *type) {
   return true;
 }
 
-int parse_NID(uint8_t *data, uint16_t data_len, const EVP_MD **md_type) {
+void parse_NID(uint8_t *data, uint16_t data_len, const EVP_MD **md_type,
+               int *digestinfo_len) {
   if (data_len >= sizeof(sha1oid) &&
       memcmp(sha1oid, data, sizeof(sha1oid)) == 0) {
     *md_type = EVP_sha1();
-    return sizeof(sha1oid);
+    *digestinfo_len = sizeof(sha1oid);
   } else if (data_len >= sizeof(sha256oid) &&
              memcmp(sha256oid, data, sizeof(sha256oid)) == 0) {
     *md_type = EVP_sha256();
-    return sizeof(sha256oid);
+    *digestinfo_len = sizeof(sha256oid);
   } else if (data_len >= sizeof(sha384oid) &&
              memcmp(sha384oid, data, sizeof(sha384oid)) == 0) {
     *md_type = EVP_sha384();
-    return sizeof(sha384oid);
+    *digestinfo_len = sizeof(sha384oid);
   } else if (data_len >= sizeof(sha512oid) &&
              memcmp(sha512oid, data, sizeof(sha512oid)) == 0) {
     *md_type = EVP_sha512();
-    return sizeof(sha512oid);
+    *digestinfo_len = sizeof(sha512oid);
   } else {
     *md_type = EVP_md_null();
-    return 0;
+    *digestinfo_len = 0;
   }
 }
 
@@ -552,18 +502,8 @@ bool read_file(FILE *fp, uint8_t *buf, size_t *buf_len) {
 
 bool base64_decode(const char *in, uint8_t *out, size_t *len) {
   int ret;
-  BIO *b64 = NULL;
-  BIO *bio = NULL;
-
-  b64 = BIO_new(BIO_f_base64());
-  if (b64 == NULL) {
-    return false;
-  }
-  bio = BIO_new(BIO_s_mem());
-  if (bio == NULL) {
-    BIO_free_all(b64);
-    return false;
-  }
+  BIO *b64 = BIO_new(BIO_f_base64());
+  BIO *bio = BIO_new(BIO_s_mem());
   BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
   BIO_push(b64, bio);
 
@@ -581,6 +521,41 @@ bool base64_decode(const char *in, uint8_t *out, size_t *len) {
   }
 }
 
+bool hex_decode(const char *in, uint8_t *out, size_t *len) {
+  int pos = 0;
+  size_t in_len = strlen(in);
+  if (in[in_len - 1] == '\n') {
+    in_len--;
+  }
+  if (in[in_len - 1] == '\r') {
+    in_len--;
+  }
+  if (in_len % 2 != 0) {
+    return false;
+  } else if (in_len / 2 > *len) {
+    return false;
+  }
+
+  for (size_t i = 0; i < in_len / 2; i++) {
+    char *endptr = NULL;
+    char buf[3] = {0};
+    long num;
+    errno = 0;
+
+    buf[0] = in[pos];
+    buf[1] = in[pos + 1];
+    num = strtol((const char *) buf, &endptr, 16);
+    if ((errno == ERANGE && (num < 0 || num > UCHAR_MAX)) ||
+        (errno != 0 && num == 0) || *endptr != '\0') {
+      return false;
+    }
+    out[i] = (uint8_t) num;
+    pos += 2;
+  }
+  *len = in_len / 2;
+  return true;
+}
+
 bool write_file(const uint8_t *buf, size_t buf_len, FILE *fp, format_t format) {
 
   const uint8_t *p = buf;
@@ -594,14 +569,7 @@ bool write_file(const uint8_t *buf, size_t buf_len, FILE *fp, format_t format) {
     BUF_MEM *bufferPtr;
 
     b64 = BIO_new(BIO_f_base64());
-    if (b64 == NULL) {
-      return false;
-    }
     bio = BIO_new(BIO_s_mem());
-    if (bio == NULL) {
-      BIO_free_all(b64);
-      return false;
-    }
     bio = BIO_push(b64, bio);
 
     (void) BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
@@ -620,9 +588,6 @@ bool write_file(const uint8_t *buf, size_t buf_len, FILE *fp, format_t format) {
     }
     p = data;
     length = buf_len * 2;
-  } else if (format == _PEM) {
-    p = buf;
-    length = buf_len;
   }
 
   do {
@@ -655,49 +620,31 @@ bool write_file(const uint8_t *buf, size_t buf_len, FILE *fp, format_t format) {
 }
 
 bool write_ed25519_key(uint8_t *buf, size_t buf_len, FILE *fp,
-                       format_t format) {
+                       bool b64_encode) {
 
-  if (format == _base64 || format == _PEM) {
+  if (b64_encode == true) {
+    uint8_t newline = '\n';
     uint8_t asn1[64];
-    uint8_t drop_newline;
+    uint8_t padding = 0;
 
-    if (fp == stdout || fp == stderr) {
-      drop_newline = 1;
-    } else {
-      drop_newline = 0;
+    if ((buf[0] & 0x80) != 0) {
+      padding = 1;
     }
 
-    if (sizeof(ed25519public_oid) + buf_len < buf_len ||
-        sizeof(ed25519public_oid) + buf_len > sizeof(asn1)) {
-      return false;
-    }
     memcpy(asn1, ed25519public_oid, sizeof(ed25519public_oid));
-    memcpy(asn1 + sizeof(ed25519public_oid), buf, buf_len);
+    asn1[1] += padding;
+    memset(asn1 + sizeof(ed25519public_oid), 0, padding);
+    asn1[10] += padding;
+    memcpy(asn1 + sizeof(ed25519public_oid) + padding, buf, buf_len);
 
-    if (format == _PEM) {
-      write_file(PEM_public_header,
-                 sizeof(PEM_public_header) - 1 - drop_newline, fp, _PEM);
-    }
-
-    write_file(asn1, sizeof(ed25519public_oid) + buf_len, fp, _base64);
-    if (fp != stdout && fp != stderr) {
-      uint8_t newline = '\n';
-      write_file(&newline, 1, fp, _PEM);
-    }
-
-    if (format == _PEM) {
-      write_file(PEM_public_trailer,
-                 sizeof(PEM_public_trailer) - 1 - drop_newline, fp, _PEM);
-    }
-  } else if (format == _hex) {
-    write_file(buf, buf_len, fp, _hex);
-
-    if (fp != stdout && fp != stderr) {
-      uint8_t newline = '\n';
-      write_file(&newline, 1, fp, _PEM);
-    }
+    write_file((uint8_t *) PEM_public_header, sizeof(PEM_public_header) - 1, fp,
+               false);
+    write_file(asn1, sizeof(ed25519public_oid) + padding + buf_len, fp, true);
+    write_file(&newline, 1, fp, false);
+    write_file((uint8_t *) PEM_public_trailer, sizeof(PEM_public_trailer) - 1,
+               fp, false);
   } else {
-    return false; // TODO(adma): _binary?
+    write_file(buf, buf_len, fp, false);
   }
 
   return true;

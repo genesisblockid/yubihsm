@@ -58,7 +58,10 @@ int main(void) {
   assert(yrc == YHR_SUCCESS);
 
   yrc = yh_create_session_derived(connector, authkey, password,
-                                  sizeof(password) - 1, false, &session);
+                                  sizeof(password), false, &session);
+  assert(yrc == YHR_SUCCESS);
+
+  yrc = yh_authenticate_session(session);
   assert(yrc == YHR_SUCCESS);
 
   uint8_t session_id;
@@ -91,7 +94,7 @@ int main(void) {
   assert(yrc == YHR_SUCCESS);
 
   printf("HMAC of data (%zu bytes) is:", hmac_data_len);
-  for (size_t i = 0; i < hmac_data_len; i++) {
+  for (uint16_t i = 0; i < hmac_data_len; i++) {
     printf(" %02x", hmac_data[i]);
   }
   printf("\n");

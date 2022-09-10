@@ -20,10 +20,8 @@
 #include <assert.h>
 
 #include <yubihsm.h>
+#include <ykyh.h>
 #include <cmdline.h>
-#ifdef YKHSMAUTH_ENABLED
-#include <ykhsmauth.h>
-#endif
 
 #define UNUSED(x) (void) (x)
 
@@ -41,22 +39,19 @@ static const struct {
   const char *name;
   cmd_format format;
 } formats[] = {
-  {"default", fmt_nofmt}, {"base64", fmt_base64}, {"binary", fmt_binary},
-  {"hex", fmt_hex},       {"PEM", fmt_PEM},       {"password", fmt_password},
-  {"ASCII", fmt_ASCII},
+  {"base64", fmt_base64}, {"binary", fmt_binary},     {"hex", fmt_hex},
+  {"PEM", fmt_PEM},       {"password", fmt_password}, {"ASCII", fmt_ASCII},
 };
 
 typedef struct {
-#ifdef USE_ASYMMETRIC_AUTH
-  uint8_t **device_pubkey_list;
-#endif
   char **connector_list;
   yh_connector *connector;
-  yh_session *sessions[256];
-#ifdef YKHSMAUTH_ENABLED
-  ykhsmauth_state *state;
-#endif
+  int n_connectors;
+  yh_session *sessions[YH_MAX_SESSIONS];
+  ykyh_state *state;
   FILE *out;
+  cmd_format in_fmt;
+  cmd_format out_fmt;
   char *cacert;
   char *proxy;
 } yubihsm_context;
@@ -64,9 +59,5 @@ typedef struct {
 int actions_run(struct gengetopt_args_info *args_info);
 int do_put_key(uint8_t *enc_key, uint8_t *mac_key, uint16_t key_id,
                uint16_t domains, uint32_t capabilities, yh_session *ses);
-
-#ifdef _MSC_VER
-#pragma strict_gs_check(on)
-#endif
 
 #endif

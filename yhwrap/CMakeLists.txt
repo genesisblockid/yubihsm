@@ -14,28 +14,23 @@
 # limitations under the License.
 #
 
-include(${CMAKE_SOURCE_DIR}/cmake/openssl.cmake)
-find_libcrypto()
+include(gengetopt)
+
+add_gengetopt_files (cmdline)
 
 set (
   SOURCE
-  ../common/hash.c
+  ${GGO_C}
   ../common/parsing.c
   ../common/util.c
-  ../common/openssl-compat.c
   main.c
   )
+if(${LIBCRYPTO_VERSION} VERSION_LESS 1.1.0)
+  set(SOURCE ${SOURCE}
+    ../common/openssl-compat.c)
+endif()
 
-if(WIN32)
-  set(SOURCE ${SOURCE} cmdline.c)
-  include(${CMAKE_SOURCE_DIR}/cmake/getopt.cmake)
-  find_getopt()
-else(WIN32)
-  include(gengetopt)
-  add_gengetopt_files (cmdline)
-  set(SOURCE ${SOURCE} ${GGO_C})
-  message("${GGO_C}")
-endif(WIN32)
+message("${GGO_C}")
 
 include_directories (
   ${LIBCRYPTO_INCLUDEDIR}
@@ -47,6 +42,12 @@ if(${WIN32})
   list(APPEND SOURCE ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version.rc @ONLY)
 endif(${WIN32})
+
+if (CMAKE_C_COMPILER_ID MATCHES Clang)
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIE")
+else ()
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIE -pie")
+endif ()
 
 # NOTE(adma): required by gengetopt
 add_definitions (-DPACKAGE="yubihsm-wrap")
@@ -63,7 +64,6 @@ add_executable (yubihsm-wrap ${SOURCE})
 target_link_libraries (
   yubihsm-wrap
   ${LIBCRYPTO_LDFLAGS}
-  ${GETOPT_LIBS}
   yubihsm
   )
 

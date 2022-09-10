@@ -14,47 +14,43 @@
 # limitations under the License.
 #
 
-include(${CMAKE_SOURCE_DIR}/cmake/openssl.cmake)
-find_libcrypto()
+include(gengetopt)
+
+find_gengetopt ()
+add_gengetopt_files (cmdline "--conf-parser")
 
 set (
   SOURCE
+  ${GGO_C}
   commands.c
   main.c
   ../common/util.c
   ../common/hash.c
-  ../common/parsing.c
-  ../common/openssl-compat.c
   )
 
-if(WIN32)
-  set(SOURCE ${SOURCE} cmdline.c)
-  include(${CMAKE_SOURCE_DIR}/cmake/getopt.cmake)
-  find_getopt()
-else(WIN32)
-  include(gengetopt)
-  find_gengetopt ()
-  add_gengetopt_files (cmdline "--conf-parser")
-  set(SOURCE ${SOURCE} ${GGO_C})
-endif(WIN32)
+if(${LIBCRYPTO_VERSION} VERSION_LESS 1.1.0)
+  set(SOURCE ${SOURCE}
+    ../common/openssl-compat.c)
+endif()
 
 include_directories (
   ${LIBCRYPTO_INCLUDEDIR}
-  ${LIBEDIT_INCLUDEDIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/../lib
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/../common
+  ${CMAKE_CURRENT_SOURCE_DIR}/../ykyh
   )
-if(ENABLE_YKHSM_AUTH)
-  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../ykhsmauth)
-  set(YKHSMAUTH_LIB ykhsmauth)
-  set(YKHSMAUTH_LIB_STATIC ykhsmauth_static)
-endif()
 
-if(WIN32)
+if(${WIN32})
   list(APPEND SOURCE ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version.rc @ONLY)
-endif(WIN32)
+endif(${WIN32})
+
+if (CMAKE_C_COMPILER_ID MATCHES Clang)
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIE")
+else ()
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIE -pie")
+endif ()
 
 # NOTE(adma): required by gengetopt
 add_definitions (-DPACKAGE="yubihsm-shell")
@@ -69,9 +65,7 @@ if (ENABLE_STATIC)
   target_link_libraries(yubihsm-shell_static
     ${LIBCRYPTO_LDFLAGS}
     ${LIBEDIT_LDFLAGS}
-    ${GETOPT_LIBS}
-    yubihsm_static
-    ${YKHSMAUTH_LIB_STATIC})
+    yubihsm_static)
   add_coverage (yubihsm-shell_static)
 endif ()
 
@@ -79,17 +73,26 @@ target_link_libraries (
   yubihsm-shell
   ${LIBCRYPTO_LDFLAGS}
   ${LIBEDIT_LDFLAGS}
-  ${GETOPT_LIBS}
   yubihsm
-  ${YKHSMAUTH_LIB})
+  )
 
 # Set install RPATH
 set_target_properties(yubihsm-shell PROPERTIES INSTALL_RPATH "${YUBIHSM_INSTALL_LIB_DIR}")
 
 add_coverage (yubihsm-shell)
 
-if (ENABLE_EXPERIMENTAL_ASYMMETRIC_AUTH)
-  add_definitions(-DUSE_ASYMMETRIC_AUTH="1")
+if (ENABLE_EXPERIMENTAL_YKYH)
+  add_definitions(-DUSE_YKYH="1")
+  target_link_libraries (
+    yubihsm-shell
+    ykyh
+    )
+  if (ENABLE_STATIC)
+    target_link_libraries (
+      yubihsm-shell_static
+      ykyh_static
+      )
+  endif()
 endif()
 
 install(

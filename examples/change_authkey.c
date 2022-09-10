@@ -59,7 +59,10 @@ int main(void) {
   assert(yrc == YHR_SUCCESS);
 
   yrc = yh_create_session_derived(connector, authkey, password1,
-                                  sizeof(password1) - 1, false, &session);
+                                  sizeof(password1), false, &session);
+  assert(yrc == YHR_SUCCESS);
+
+  yrc = yh_authenticate_session(session);
   assert(yrc == YHR_SUCCESS);
 
   uint8_t session_id;
@@ -104,7 +107,10 @@ int main(void) {
   printf("Closed session %02d\n", session_id);
 
   yrc = yh_create_session_derived(connector, key_id, password2,
-                                  sizeof(password2) - 1, false, &session);
+                                  sizeof(password2), false, &session);
+  assert(yrc == YHR_SUCCESS);
+
+  yrc = yh_authenticate_session(session);
   assert(yrc == YHR_SUCCESS);
 
   yrc = yh_get_session_id(session, &session_id);
@@ -131,7 +137,7 @@ int main(void) {
   printf("Closed session %02d\n", session_id);
 
   yrc = yh_create_session_derived(connector, key_id, password2,
-                                  sizeof(password2) - 1, false, &session);
+                                  sizeof(password2), false, &session);
   assert(yrc == YHR_CRYPTOGRAM_MISMATCH);
 
   printf("Unable to open session with Authentication Key %04x and password "
@@ -142,7 +148,10 @@ int main(void) {
   assert(yrc == YHR_SUCCESS);
 
   yrc = yh_create_session_derived(connector, key_id, password3,
-                                  sizeof(password3) - 1, false, &session);
+                                  sizeof(password3), false, &session);
+  assert(yrc == YHR_SUCCESS);
+
+  yrc = yh_authenticate_session(session);
   assert(yrc == YHR_SUCCESS);
 
   yrc = yh_get_session_id(session, &session_id);

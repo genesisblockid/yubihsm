@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-#define _CRT_SECURE_NO_WARNINGS
-
 #include <windows.h>
 #include <winhttp.h>
 #include <winsock.h>
@@ -28,7 +26,6 @@
 #include "debug_lib.h"
 
 #define MAX_STR_LEN 128
-#define UNUSED(x) (void) (x)
 
 struct urlComponents {
   bool https;
@@ -37,38 +34,114 @@ struct urlComponents {
   wchar_t path[MAX_STR_LEN + 1];
 };
 
+enum stage {
+  NO_INIT,
+  REQUEST_SENT,
+  RESPONSE_WAITING,
+  RESPONSE_RECEIVED,
+  DATA_AVAILABLE,
+  DATA_WAITING,
+  READ_COMPLETE,
+  REQUEST_SUCCESS,
+  REQUEST_ERROR,
+  CLOSE_WAITING,
+  REQUEST_CLOSED,
+  REQUEST_DONE,
+};
+
+struct context {
+  enum stage stage;
+  CRITICAL_SECTION mtx;
+  HINTERNET req;
+  uint16_t len;
+};
+
 struct state {
-  HINTERNET session;
-  HINTERNET connection;
+  HINTERNET internet;
+  HINTERNET con;
   yh_connector *connector;
-  struct urlComponents status_url;
-  struct urlComponents api_url;
+  struct context *context;
 };
 
 uint8_t YH_INTERNAL _yh_verbosity;
 FILE YH_INTERNAL *_yh_output;
 
-static bool parseUrl(const char *url, struct urlComponents *components) {
-  wchar_t wUrl[MAX_STR_LEN * 2];
-  size_t len = mbstowcs(wUrl, url, _countof(wUrl));
-  if (len == _countof(wUrl)) {
+static bool parseUrl(char *url, struct urlComponents *components) {
+  wchar_t wUrl[129];
+  size_t len = strlen(url);
+
+  if (len > 128) {
+    return false;
+  }
+  mbstowcs(wUrl, url, len);
+  URL_COMPONENTS c = {0};
+  c.dwStructSize = sizeof(c);
+  c.dwSchemeLength = -1;
+  c.dwHostNameLength = -1;
+  c.dwUrlPathLength = -1;
+
+  if (WinHttpCrackUrl(wUrl, len, 0, &c) != TRUE) {
     return false;
   }
 
-  URL_COMPONENTS c = {sizeof(c)};
-  c.lpszHostName = components->hostname;
-  c.dwHostNameLength = _countof(components->hostname);
-  c.lpszUrlPath = components->path;
-  c.dwUrlPathLength = _countof(components->path);
-
-  if (!WinHttpCrackUrl(wUrl, (DWORD) len, 0, &c)) {
-    return false;
+  if (c.nScheme == INTERNET_SCHEME_HTTPS) {
+    components->https = true;
+  } else {
+    components->https = false;
   }
 
-  components->https = c.nScheme == INTERNET_SCHEME_HTTPS;
+  if (c.dwHostNameLength > MAX_STR_LEN || c.dwUrlPathLength > MAX_STR_LEN) {
+    return false;
+  }
+  wcsncpy_s(components->hostname,
+            sizeof(components->hostname) / sizeof(components->hostname[0]),
+            c.lpszHostName, c.dwHostNameLength);
+  wcsncpy_s(components->path,
+            sizeof(components->path) / sizeof(components->path[0]),
+            c.lpszUrlPath, c.dwUrlPathLength);
   components->port = c.nPort;
-
   return true;
+}
+
+static void CALLBACK http_callback(HINTERNET internet __attribute__((unused)),
+                                   DWORD_PTR context, DWORD status,
+                                   LPVOID statusInfo, DWORD statusInfoLen) {
+  struct context *c = (struct context *) context;
+  enum stage new_stage = NO_INIT;
+  EnterCriticalSection(&c->mtx);
+  switch (status) {
+    case WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE:
+      DBG_INFO("sendreq complete");
+      new_stage = REQUEST_SENT;
+      break;
+    case WINHTTP_CALLBACK_STATUS_RESPONSE_RECEIVED:
+      DBG_INFO("response received");
+      new_stage = RESPONSE_RECEIVED;
+      break;
+    case WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE:
+      DBG_INFO("data available");
+      new_stage = DATA_AVAILABLE;
+      break;
+    case WINHTTP_CALLBACK_STATUS_READ_COMPLETE:
+      DBG_INFO("read complete");
+      new_stage = READ_COMPLETE;
+      c->len = statusInfoLen;
+      break;
+    case WINHTTP_CALLBACK_STATUS_REQUEST_ERROR: {
+      WINHTTP_ASYNC_RESULT *result = (WINHTTP_ASYNC_RESULT *) statusInfo;
+      DBG_ERR("Request error: %lu %lu", (long unsigned) result->dwResult,
+              result->dwError);
+      new_stage = REQUEST_ERROR;
+    } break;
+    case WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING:
+      DBG_INFO("handle closing");
+      new_stage = REQUEST_CLOSED;
+      break;
+  }
+  if (new_stage > c->stage) {
+    c->stage = new_stage;
+  }
+  LeaveCriticalSection(&c->mtx);
 }
 
 static void backend_set_verbosity(uint8_t verbosity, FILE *output) {
@@ -77,222 +150,246 @@ static void backend_set_verbosity(uint8_t verbosity, FILE *output) {
 }
 
 static yh_rc backend_init(uint8_t verbosity, FILE *output) {
-  DBG_INFO("backend_init");
   backend_set_verbosity(verbosity, output);
   return YHR_SUCCESS;
 }
 
-static void backend_cleanup(void) { DBG_INFO("backend_cleanup"); }
+static void backend_cleanup(void) {}
 
 static yh_backend *backend_create(void) {
-  DBG_INFO("backend_create");
+  DBG_INFO("Doing backend_create");
   yh_backend *backend = calloc(1, sizeof(yh_backend));
-  if (backend) {
-    backend->session =
-      WinHttpOpen(L"YubiHSM WinHttp/" VERSION, WINHTTP_ACCESS_TYPE_NO_PROXY,
-                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-  }
+  backend->internet =
+    WinHttpOpen(L"YubiHSM WinHttp/" VERSION, WINHTTP_ACCESS_TYPE_NO_PROXY,
+                WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS,
+                WINHTTP_FLAG_ASYNC);
+  backend->context = calloc(1, sizeof(struct context));
+  InitializeCriticalSection(&backend->context->mtx);
+  WinHttpSetOption(backend->internet, WINHTTP_OPTION_CONTEXT_VALUE,
+                   &backend->context, sizeof(backend->context));
+  WinHttpSetStatusCallback(backend->internet, http_callback,
+                           WINHTTP_CALLBACK_FLAG_ALL_NOTIFICATIONS, 0);
   return backend;
 }
 
 static void backend_disconnect(yh_backend *connection) {
-  DBG_INFO("backend_disconnect");
-  WinHttpCloseHandle(connection->connection);
-  WinHttpCloseHandle(connection->session);
+  WinHttpCloseHandle(connection->con);
+  WinHttpCloseHandle(connection->internet);
+  Sleep(1);
+  EnterCriticalSection(&connection->context->mtx);
+  DeleteCriticalSection(&connection->context->mtx);
+  free(connection->context);
   free(connection);
 }
 
 static yh_rc backend_connect(yh_connector *connector, int timeout) {
-  DBG_INFO("backend_connect");
+  uint8_t buf[MAX_STR_LEN + 1];
+  yh_rc res = YHR_CONNECTOR_ERROR;
+
+  ZeroMemory(buf, MAX_STR_LEN + 1);
+
   if (timeout == 0) {
     // TODO: what does winhttp do if it gets timeout 0?
     timeout = 300;
   }
 
+  struct urlComponents components = {0};
   yh_backend *backend = connector->connection;
   backend->connector = connector;
-
-  if (!parseUrl(connector->status_url, &backend->status_url)) {
-    DBG_ERR("Status URL parsing failed.");
+  DBG_INFO("setting up connection to %s", connector->status_url);
+  if (parseUrl(connector->status_url, &components) == false) {
+    DBG_INFO("URL parsing failed.");
     return YHR_INVALID_PARAMETERS;
   }
-
-  if (!parseUrl(connector->api_url, &backend->api_url)) {
-    DBG_ERR("Api URL parsing failed.");
-    return YHR_INVALID_PARAMETERS;
-  }
-
-  DBG_INFO("Connecting to %s", connector->status_url);
-  backend->connection =
-    WinHttpConnect(backend->session, backend->status_url.hostname,
-                   backend->status_url.port, 0);
-  if (!backend->connection) {
-    DBG_ERR("Failed connecting to %s", connector->status_url);
-    return YHR_CONNECTOR_ERROR;
-  }
-
-  HINTERNET request =
-    WinHttpOpenRequest(backend->connection, L"GET", backend->status_url.path,
-                       NULL, NULL, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                       backend->status_url.https ? WINHTTP_FLAG_SECURE : 0);
-  if (!request) {
-    DBG_ERR("Failed opening request to %s", connector->status_url);
-    return YHR_CONNECTOR_ERROR;
-  }
+  backend->con =
+    WinHttpConnect(backend->internet, components.hostname, components.port, 0);
+  backend->context->stage = NO_INIT;
+  backend->context->len = 0;
+  backend->context->req =
+    WinHttpOpenRequest(backend->con, L"GET", components.path, NULL, NULL,
+                       WINHTTP_DEFAULT_ACCEPT_TYPES,
+                       components.https ? WINHTTP_FLAG_SECURE : 0);
   if (timeout > 0) {
-    if (!WinHttpSetTimeouts(request, timeout * 1000, timeout * 1000,
-                            timeout * 1000, timeout * 1000)) {
-      DBG_ERR("Failed setting timeouts.");
+    WinHttpSetTimeouts(backend->context->req, timeout * 1000, timeout * 1000,
+                       timeout * 1000, timeout * 1000);
+  }
+  WinHttpSendRequest(backend->context->req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                     WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+
+  DWORD dwStatusCode = 0;
+  DWORD dwSize = sizeof(dwStatusCode);
+  bool complete = false;
+
+  while (!complete) {
+    enum stage new_stage = 0;
+    EnterCriticalSection(&backend->context->mtx);
+    switch (backend->context->stage) {
+      case REQUEST_SENT:
+        DBG_INFO("Request sent");
+        WinHttpReceiveResponse(backend->context->req, NULL);
+        new_stage = RESPONSE_WAITING;
+        break;
+      case RESPONSE_RECEIVED:
+        DBG_INFO("Response received");
+        WinHttpQueryDataAvailable(backend->context->req, NULL);
+        break;
+      case DATA_AVAILABLE:
+        DBG_INFO("Data available");
+        if (WinHttpReadData(backend->context->req, buf, MAX_STR_LEN, NULL) ==
+            FALSE) {
+          DBG_ERR("Failed request for new data: %lu", GetLastError());
+          new_stage = REQUEST_ERROR;
+        } else {
+          new_stage = DATA_WAITING;
+        }
+        break;
+      case READ_COMPLETE:
+        DBG_INFO("Read complete");
+        WinHttpQueryHeaders(backend->context->req,
+                            WINHTTP_QUERY_STATUS_CODE |
+                              WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &dwStatusCode,
+                            &dwSize, WINHTTP_NO_HEADER_INDEX);
+
+        WinHttpCloseHandle(backend->context->req);
+        if (dwStatusCode != HTTP_STATUS_OK) {
+          DBG_ERR("Got HTTP error from server: %lu", dwStatusCode);
+          new_stage = REQUEST_ERROR;
+          res = YHR_CONNECTOR_NOT_FOUND;
+        } else {
+          parse_status_data((char *) buf, connector);
+          new_stage = REQUEST_SUCCESS;
+          res = YHR_SUCCESS;
+        }
+        break;
+      case REQUEST_ERROR:
+        DBG_INFO("Request error");
+      case REQUEST_CLOSED:
+        new_stage = REQUEST_DONE;
+        complete = true;
+        break;
+      default:
+        break;
     }
+    if (new_stage > backend->context->stage) {
+      backend->context->stage = new_stage;
+    }
+    LeaveCriticalSection(&backend->context->mtx);
   }
 
-  DBG_INFO("Sending request to %s", connector->status_url);
-  if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                          WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-    DBG_ERR("Failed sending request to %s", connector->status_url);
-    WinHttpCloseHandle(request);
-    return YHR_CONNECTOR_ERROR;
-  }
-
-  if (!WinHttpReceiveResponse(request, 0)) {
-    DBG_ERR("Failed receiving response from %s", connector->status_url);
-    WinHttpCloseHandle(request);
-    return YHR_CONNECTOR_ERROR;
-  }
-
-  DWORD dwStatusCode, dwSize = sizeof(dwStatusCode);
-
-  if (!WinHttpQueryHeaders(request,
-                           WINHTTP_QUERY_STATUS_CODE |
-                             WINHTTP_QUERY_FLAG_NUMBER,
-                           WINHTTP_HEADER_NAME_BY_INDEX, &dwStatusCode, &dwSize,
-                           WINHTTP_NO_HEADER_INDEX)) {
-    DBG_ERR("Failed retrieveing status code from %s",
-            backend->connector->status_url);
-    WinHttpCloseHandle(request);
-    return YHR_CONNECTOR_ERROR;
-  }
-
-  if (dwStatusCode != 200) {
-    DBG_ERR("Invalid status code %u received from %s", dwStatusCode,
-            backend->connector->status_url);
-    WinHttpCloseHandle(request);
-    return YHR_CONNECTOR_ERROR;
-  }
-
-  char buf[256];
-  DWORD offs = 0, bytes;
-  while (WinHttpReadData(request, buf + offs, sizeof(buf) - offs, &bytes)) {
-    if (bytes == 0)
-      break;
-    offs += bytes;
-    if (offs >= sizeof(buf))
-      break;
-  }
-
-  DBG_INFO("Read %u bytes from %s", offs, connector->status_url);
-
-  WinHttpCloseHandle(request);
-
-  parse_status_data(buf, connector);
-  if (!connector->has_device) {
-    DBG_ERR("Response from %s indicates no device is present",
-            connector->status_url);
-    return YHR_CONNECTOR_NOT_FOUND;
-  }
-
-  return YHR_SUCCESS;
+  return res;
 }
 
-static yh_rc backend_send_msg(yh_backend *backend, Msg *msg, Msg *response,
-                              const char *identifier) {
-  uint16_t raw_len = ntohs(msg->st.len) + 3;
-  wchar_t hsm_identifier[64];
-  wchar_t *headers = WINHTTP_NO_ADDITIONAL_HEADERS;
-  DWORD headers_len = 0;
+static yh_rc backend_send_msg(yh_backend *connection, Msg *msg, Msg *response) {
+  struct urlComponents components = {0};
+  bool complete = false;
+  yh_rc yrc = YHR_CONNECTOR_ERROR;
+  uint16_t raw_len = msg->st.len + 3;
+  DWORD dwStatusCode = 0;
+  DWORD dwSize = sizeof(dwStatusCode);
 
-  if (identifier != NULL && strlen(identifier) > 0 && strlen(identifier) < 32) {
-    headers_len =
-      swprintf(hsm_identifier, 64, L"YubiHSM-Session: %hs", identifier);
-    headers = hsm_identifier;
+  DBG_INFO("sending message to %s", connection->connector->api_url);
+  if (parseUrl(connection->connector->api_url, &components) == false) {
+    return yrc;
   }
 
-  HINTERNET request =
-    WinHttpOpenRequest(backend->connection, L"POST", backend->api_url.path,
-                       NULL, NULL, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                       backend->api_url.https ? WINHTTP_FLAG_SECURE : 0);
-  if (!request) {
-    DBG_ERR("Failed opening request to %s", backend->connector->api_url);
-    return YHR_CONNECTOR_ERROR;
-  }
+  // swap the length in the message
+  msg->st.len = htons(msg->st.len);
 
+  connection->context->stage = NO_INIT;
+  connection->context->len = 0;
+  connection->context->req =
+    WinHttpOpenRequest(connection->con, L"POST", components.path, NULL, NULL,
+                       WINHTTP_DEFAULT_ACCEPT_TYPES,
+                       components.https ? WINHTTP_FLAG_SECURE : 0);
   // TODO: replace these magic numbers with something better.
   //  of note here is the 250s timeout on receive, generating rsa4096 might take
   //  some time..
-  if (!WinHttpSetTimeouts(request, 30 * 1000, 30 * 1000, 250 * 1000,
-                          250 * 1000)) {
-    DBG_ERR("Failed setting timeouts.");
+  WinHttpSetTimeouts(connection->context->req, 30 * 1000, 30 * 1000, 250 * 1000,
+                     250 * 1000);
+
+  WinHttpSendRequest(connection->context->req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                     msg->raw, raw_len, raw_len, 0);
+
+  while (!complete) {
+    enum stage new_stage = 0;
+    EnterCriticalSection(&connection->context->mtx);
+    switch (connection->context->stage) {
+      case REQUEST_SENT:
+        DBG_INFO("Request sent");
+        WinHttpReceiveResponse(connection->context->req, NULL);
+        new_stage = RESPONSE_WAITING;
+        break;
+      case RESPONSE_RECEIVED:
+        DBG_INFO("Response received");
+        WinHttpQueryDataAvailable(connection->context->req, NULL);
+        break;
+      case DATA_AVAILABLE:
+        DBG_INFO("Data available");
+        if (WinHttpReadData(connection->context->req, response->raw,
+                            SCP_MSG_BUF_SIZE, NULL) == FALSE) {
+          DBG_ERR("Failed request for new data: %lu", GetLastError());
+          new_stage = REQUEST_ERROR;
+        } else {
+          new_stage = DATA_WAITING;
+        }
+        break;
+      case READ_COMPLETE:
+        DBG_INFO("Read complete");
+        if (connection->context->len == 0) {
+          // NOTE: this is a hack to try to handle the case where we get 0
+          // bytes..
+          DBG_INFO(
+            "Got a 0 length response, hoping there's more on the wire for us.");
+          new_stage = connection->context->stage = RESPONSE_RECEIVED;
+          break;
+        }
+
+        WinHttpQueryHeaders(connection->context->req,
+                            WINHTTP_QUERY_STATUS_CODE |
+                              WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &dwStatusCode,
+                            &dwSize, WINHTTP_NO_HEADER_INDEX);
+
+        if (dwStatusCode != HTTP_STATUS_OK) {
+          DBG_ERR("Got HTTP error from server: %lu", dwStatusCode);
+          new_stage = REQUEST_ERROR;
+          yrc = YHR_CONNECTOR_ERROR;
+        } else {
+          WinHttpCloseHandle(connection->context->req);
+          response->st.len = ntohs(response->st.len);
+          if (response->st.len + 3 == connection->context->len) {
+            new_stage = REQUEST_SUCCESS;
+            yrc = YHR_SUCCESS;
+          } else {
+            DBG_ERR("Wrong length received, %d vs %d", response->st.len + 3,
+                    connection->context->len);
+            new_stage = REQUEST_ERROR;
+            yrc = YHR_WRONG_LENGTH;
+          }
+        }
+        break;
+      case REQUEST_ERROR:
+        DBG_ERR("Request error");
+        yrc = YHR_CONNECTOR_ERROR;
+        WinHttpCloseHandle(connection->context->req);
+      case REQUEST_CLOSED:
+        complete = true;
+        new_stage = REQUEST_DONE;
+        break;
+      default:
+        break;
+    }
+    if (new_stage > connection->context->stage) {
+      connection->context->stage = new_stage;
+    }
+    LeaveCriticalSection(&connection->context->mtx);
   }
 
-  DBG_INFO("Sending %u bytes to %s", raw_len, backend->connector->api_url);
-  if (!WinHttpSendRequest(request, headers, headers_len, msg->raw, raw_len,
-                          raw_len, 0)) {
-    DBG_ERR("Failed sending request to %s", backend->connector->api_url);
-    WinHttpCloseHandle(request);
-    return YHR_CONNECTOR_ERROR;
-  }
+  // restore the msg len
+  msg->st.len = ntohs(msg->st.len);
 
-  if (!WinHttpReceiveResponse(request, 0)) {
-    DBG_ERR("Failed receiving response from %s", backend->connector->api_url);
-    WinHttpCloseHandle(request);
-    return YHR_CONNECTOR_ERROR;
-  }
-
-  DWORD dwStatusCode, dwSize = sizeof(dwStatusCode);
-
-  if (!WinHttpQueryHeaders(request,
-                           WINHTTP_QUERY_STATUS_CODE |
-                             WINHTTP_QUERY_FLAG_NUMBER,
-                           WINHTTP_HEADER_NAME_BY_INDEX, &dwStatusCode, &dwSize,
-                           WINHTTP_NO_HEADER_INDEX)) {
-    DBG_ERR("Failed retrieveing status code from %s",
-            backend->connector->api_url);
-    WinHttpCloseHandle(request);
-    return YHR_CONNECTOR_ERROR;
-  }
-
-  if (dwStatusCode != 200) {
-    DBG_ERR("Invalid status code %u received from %s", dwStatusCode,
-            backend->connector->api_url);
-    WinHttpCloseHandle(request);
-    return YHR_CONNECTOR_ERROR;
-  }
-
-  DWORD offs = 0, bytes;
-  while (WinHttpReadData(request, response->raw + offs,
-                         sizeof(response->raw) - offs, &bytes)) {
-    if (bytes == 0)
-      break;
-    offs += bytes;
-    if (offs >= sizeof(response->raw))
-      break;
-  }
-
-  DBG_INFO("Read %u bytes from %s", offs, backend->connector->api_url);
-
-  WinHttpCloseHandle(request);
-
-  if (offs < 3) {
-    DBG_ERR("Not enough data received; %lu", offs);
-    return YHR_WRONG_LENGTH;
-  }
-
-  if (ntohs(response->st.len) != offs - 3) {
-    DBG_ERR("Wrong length received, %d vs %lu", ntohs(response->st.len), offs);
-    return YHR_WRONG_LENGTH;
-  }
-
-  return YHR_SUCCESS;
+  return yrc;
 }
 
 static yh_rc backend_option(yh_backend *connection, yh_connector_option opt,

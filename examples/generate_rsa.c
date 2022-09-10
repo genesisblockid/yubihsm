@@ -63,7 +63,10 @@ int main(void) {
   assert(yrc == YHR_SUCCESS);
 
   yrc = yh_create_session_derived(connector, authkey, password,
-                                  sizeof(password) - 1, false, &session);
+                                  sizeof(password), false, &session);
+  assert(yrc == YHR_SUCCESS);
+
+  yrc = yh_authenticate_session(session);
   assert(yrc == YHR_SUCCESS);
 
   uint8_t session_id;

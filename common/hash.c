@@ -21,8 +21,6 @@
 #include <openssl/evp.h>
 #endif
 
-#include <stdlib.h>
-
 #include "hash.h"
 #include "insecure_memzero.h"
 
@@ -94,34 +92,24 @@ bool hash_bytes(const uint8_t *in, size_t len, hash_t hash, uint8_t *out,
 #ifndef _WIN32_BCRYPT
 
   const EVP_MD *md;
-  uint32_t d_len = 0;
-  bool ret = false;
+
+  uint32_t d_len;
 
   md = get_hash(hash);
   if (md == NULL) {
     return false;
   }
 
-  if (EVP_MD_size(md) < 0 || *out_len < (size_t) EVP_MD_size(md)) {
-    return false;
-  }
-
   EVP_MD_CTX *mdctx = EVP_MD_CTX_create();
-  if ((EVP_DigestInit_ex(mdctx, md, NULL)) != 1) {
-    goto hash_bytes_exit;
-  }
-  if ((EVP_DigestUpdate(mdctx, in, len)) != 1) {
-    goto hash_bytes_exit;
-  }
-  if ((EVP_DigestFinal_ex(mdctx, out, &d_len)) != 1) {
-    goto hash_bytes_exit;
-  }
-  ret = true;
+  EVP_DigestInit_ex(mdctx, md, NULL);
+  EVP_DigestUpdate(mdctx, in, len);
+  EVP_DigestFinal_ex(mdctx, out, &d_len);
 
-hash_bytes_exit:
   *out_len = (uint16_t) d_len;
+
   EVP_MD_CTX_destroy(mdctx);
-  return ret;
+
+  return true;
 
 #else
 
@@ -322,9 +310,7 @@ bool hash_init(_hash_ctx *ctx) {
   }
 
 #else
-  if (EVP_DigestInit_ex(ctx->mdctx, ctx->md, NULL) != 1) {
-    return false;
-  }
+  EVP_DigestInit_ex(ctx->mdctx, ctx->md, NULL);
 #endif
 
   return true;
@@ -356,9 +342,7 @@ bool hash_update(_hash_ctx *ctx, const uint8_t *in, size_t cb_in) {
     return false;
   }
 
-  if (EVP_DigestUpdate(ctx->mdctx, in, cb_in) != 1) {
-    return false;
-  }
+  EVP_DigestUpdate(ctx->mdctx, in, cb_in);
 #endif
 
   return true;
@@ -392,10 +376,7 @@ bool hash_final(_hash_ctx *ctx, uint8_t *out, size_t *pcb_out) {
   *pcb_out = ctx->cbHash;
 
 #else
-  if (EVP_DigestFinal_ex(ctx->mdctx, out, &d_len) != 1) {
-    *pcb_out = 0;
-    return false;
-  }
+  EVP_DigestFinal_ex(ctx->mdctx, out, &d_len);
   *pcb_out = d_len;
 
 #endif

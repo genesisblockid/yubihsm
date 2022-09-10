@@ -19,8 +19,6 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include "../common/platform-config.h"
 
 // NOTE(adma): those utility functions do not link against libyubihsm
 
@@ -31,11 +29,9 @@
 #define YH_INTERNAL
 #endif
 
-enum input_visibility { VISIBLE, HIDDEN_CHECKED, HIDDEN_UNCHECKED };
-
+bool YH_INTERNAL parse_pw(const char *prompt, char *pw, char *parsed,
+                          size_t *parsed_len);
 bool YH_INTERNAL read_string(const char *name, char *str_buf,
-                             size_t str_buf_len,
-                             enum input_visibility visibility);
-bool YH_INTERNAL hex_decode(const char *in, uint8_t *out, size_t *len);
+                             size_t str_buf_len, bool hidden);
 
 #endif

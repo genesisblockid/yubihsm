@@ -17,18 +17,19 @@
 #ifndef YUBIHSM_INTERNAL_H
 #define YUBIHSM_INTERNAL_H
 
-#include "../common/platform-config.h"
 #include "scp.h"
 
 #include <stdlib.h>
 #include <stdbool.h>
 
 struct yh_session {
+  struct yh_connector *parent;
   uint16_t authkey_id;
+  bool recreate;
   uint8_t key_enc[SCP_KEY_LEN];
   uint8_t key_mac[SCP_KEY_LEN];
   Scp_ctx s;
-  uint8_t context[2 * YH_EC_P256_PUBKEY_LEN];
+  uint8_t context[SCP_CONTEXT_LEN];
 };
 
 typedef struct state yh_backend;
@@ -66,8 +67,7 @@ struct backend_functions {
   yh_backend *(*backend_create)(void);
   yh_rc (*backend_connect)(yh_connector *connector, int timeout);
   void (*backend_disconnect)(yh_backend *connection);
-  yh_rc (*backend_send_msg)(yh_backend *connection, Msg *msg, Msg *response,
-                            const char *identifier);
+  yh_rc (*backend_send_msg)(yh_backend *connection, Msg *msg, Msg *response);
   void (*backend_cleanup)(void);
   yh_rc (*backend_option)(yh_backend *connection, yh_connector_option opt,
                           const void *val);
@@ -77,8 +77,6 @@ struct backend_functions {
 #ifdef STATIC
 struct backend_functions YH_INTERNAL *usb_backend_functions(void);
 struct backend_functions YH_INTERNAL *http_backend_functions(void);
-#else
-struct backend_functions *backend_functions(void);
 #endif
 
 #endif

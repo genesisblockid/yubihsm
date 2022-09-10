@@ -14,19 +14,16 @@
 # limitations under the License.
 #
 
-cmake_minimum_required (VERSION 3.1)
-# policy CMP0025 is to get AppleClang identifier rather than Clang for both
-# this matters since the apple compiler accepts different flags.
-cmake_policy(SET CMP0025 NEW)
-cmake_policy(SET CMP0042 NEW)
-cmake_policy(SET CMP0054 NEW)
+cmake_minimum_required (VERSION 2.8)
+if (CMAKE_VERSION VERSION_GREATER 3.0.0)
+  # policy CMP0025 is to get AppleClang identifier rather than Clang for both
+  # this matters since the apple compiler accepts different flags.
+  cmake_policy(SET CMP0025 NEW)
+endif ()
 
 project (yubihsm-shell)
 
 option(BUILD_ONLY_LIB "Library only build" OFF)
-option(SUPRESS_MSVC_WARNINGS "Suppresses a lot of the warnings when compiling with MSVC" ON)
-
-include(${CMAKE_SOURCE_DIR}/cmake/SecurityFlags.cmake)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 
@@ -51,6 +48,13 @@ if (NOT DEFINED YUBIHSM_INSTALL_PKGCONFIG_DIR)
   set(YUBIHSM_INSTALL_PKGCONFIG_DIR "${CMAKE_INSTALL_PREFIX}/share/pkgconfig" CACHE PATH "Installation directory for pkgconfig (.pc) files")
 endif ()
 
+message("Install targets")
+message("Libraries ${YUBIHSM_INSTALL_LIB_DIR}")
+message("Includes ${YUBIHSM_INSTALL_INC_DIR}")
+message("Binaries ${YUBIHSM_INSTALL_BIN_DIR}")
+message("Manuals ${YUBIHSM_INSTALL_MAN_DIR}")
+message("Pkg-config ${YUBIHSM_INSTALL_PKGCONFIG_DIR}")
+
 if (NOT CMAKE_BUILD_TYPE)
    if (${RELEASE_BUILD} MATCHES 1)
       set (CMAKE_BUILD_TYPE Release)
@@ -59,37 +63,47 @@ if (NOT CMAKE_BUILD_TYPE)
    endif ()
 endif ()
 
-if(MSVC)
-  set(DISABLE_LTO 1)
-endif()
-if (NOT DISABLE_LTO)
-  if (CMAKE_C_COMPILER_ID STREQUAL GNU)
-    if (CMAKE_C_COMPILER_VERSION VERSION_GREATER 6.0)
-      set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -flto")
-    endif ()
-  else ()
-    if (CMAKE_C_COMPILER_VERSION VERSION_GREATER 7.0)
-      set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -flto")
-    endif ()
+set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pedantic")
+set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror")
+set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-format-zero-length -Wno-implicit-fallthrough")
+set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wformat -Wformat-security")
+
+# fortify can only be used with -O2 and higher, so only enable for release builds
+set (CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -D_FORTIFY_SOURCE=2")
+if (CMAKE_C_COMPILER_ID STREQUAL GNU)
+  if (CMAKE_C_COMPILER_VERSION VERSION_GREATER 6.0)
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -flto")
+  endif ()
+else ()
+  if (CMAKE_C_COMPILER_VERSION VERSION_GREATER 7.0)
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -flto")
   endif ()
 endif ()
 
 if (CMAKE_C_COMPILER_ID STREQUAL AppleClang)
-  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-nullability-completeness -Wno-nullability-extension -Wno-expansion-to-defined -Wno-undef-prefix")
-elseif (NOT MSVC)
+  set (CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -fPIE")
+else()
   # -Wl,--strip-all is dependent on linker not compiler...
-  set (CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--strip-all")
+  set (CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--strip-all -fPIE -pie")
 endif ()
 
-set (CMAKE_C_STANDARD 11)
+
+# cmake 3.1 or greater can do this automatically; assume gcc otherwise.
+if ((${CMAKE_MAJOR_VERSION} GREATER 2) AND (${CMAKE_MINOR_VERSION} GREATER 0))
+  set (CMAKE_C_STANDARD 11)
+else ()
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu1x")
+endif ()
 
 set (yubihsm_shell_VERSION_MAJOR 2)
-set (yubihsm_shell_VERSION_MINOR 3)
-set (yubihsm_shell_VERSION_PATCH 2)
+set (yubihsm_shell_VERSION_MINOR 0)
+set (yubihsm_shell_VERSION_PATCH 1)
 set (VERSION "${yubihsm_shell_VERSION_MAJOR}.${yubihsm_shell_VERSION_MINOR}.${yubihsm_shell_VERSION_PATCH}")
 
-if (${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
-  set(ENV{PKG_CONFIG_PATH} "/usr/libdata/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+  set(ENV{PKG_CONFIG_PATH} "/usr/local/opt/openssl/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+  set(ENV{PKG_CONFIG_PATH} "/usr/local/opt/pcsc-lite/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+  set(ENV{PKG_CONFIG_PATH} "/usr/local/opt/libedit/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
 endif ()
 
 if (NOT DEFINED DEFAULT_CONNECTOR_URL)
@@ -99,49 +113,40 @@ endif()
 enable_testing()
 find_package(codecov)
 
-add_definitions(-DOPENSSL_API_COMPAT=0x10000000L)
-
-if(WIN32)
-  add_definitions(-DWIN32_LEAN_AND_MEAN=1)
-  set(_WIN32 1)
-  set(__WIN32 1)
-  set(_WIN32_BCRYPT 1)
-endif()
-
-if(MSVC)
+if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
   message("win32")
-  set(_MSVC 1)
-
-  if(SUPRESS_MSVC_WARNINGS)
-  set(MSVC_DISABLED_WARNINGS_LIST
-            "C4706" # assignment within conditional expression;
-            "C4996" # The POSIX name for this item is deprecated. Instead, use the ISO C and C++ conformant name
-            "C4005" # redefinition of micros. Status codes are defined in winnt.h and then redefined in ntstatus.h with the same values
-            "C4244" # conversion of size_t to other types. Since we don't have sizes that occupy more than 2 bytes, this should be safe to ignore
-            "C4267" # conversion of size_t to other types. Since we don't have sizes that occupy more than 2 bytes, this should be safe to ignore
-            "C4100" # unreferenced formal parameter
-            "C4201" # nonstandard extension used: nameless struct/union
-            "C4295" # array is too small to include a terminating null character. They arrays it's complaining about aren't meant to include terminating null character (triggered in tests and examples only)
-            "C4127" # conditional expression is constant
-            "C5105" # macro expansion producing 'defined' has undefined behavior
-            "C4018" # signed/unsigned mismatch
-            )
-    # The construction in the following 3 lines was taken from LibreSSL's
-    # CMakeLists.txt.
-    string(REPLACE "C" " -wd" MSVC_DISABLED_WARNINGS_STR ${MSVC_DISABLED_WARNINGS_LIST})
-    string(REGEX REPLACE "[/-]W[1234][ ]?" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -MP -W4 ${MSVC_DISABLED_WARNINGS_STR}")
-  endif(SUPRESS_MSVC_WARNINGS)
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-use-linker-plugin -static-libgcc")
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,--nxcompat")
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,--disable-auto-image-base -Wl,--dynamicbase")
+  if ("${CMAKE_SIZEOF_VOID_P}" EQUAL "8")
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,--high-entropy-va")
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,--image-base -Wl,0x140000000")
+  endif ()
+  # gcc with -pie puts the entry adress in the wrong spot, help it..
+  set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-emainCRTStartup")
+  add_definitions (-D_POSIX_THREAD_SAFE_FUNCTIONS=1)
+  add_definitions (-D__USE_MINGW_ANSI_STDIO=1)
+  add_definitions (-DWIN32_LEAN_AND_MEAN=1)
   set (WITHOUT_MANPAGES 1)
+  set (ENABLE_EXPERIMENTAL_YKYH 1)
   if (NOT WITHOUT_WIN32_BCRYPT)
     set (WIN32_BCRYPT 1)
   endif()
+  if (NOT LIBCRYPTO_LDFLAGS)
+    set (LIBCRYPTO_LDFLAGS "-lcrypto")
+  endif()
+  if (NOT LIBCRYPTO_VERSION)
+    # msys now installs openssl 1.1.1, hardcode to that until we come up with something cleverer
+    set(LIBCRYPTO_VERSION "1.1.1")
+  endif()
 else()
-  message(STATUS "not win32")
+  message("not win32")
 
-  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-missing-braces")
-  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-missing-field-initializers")
-  
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-protector-all")
+  if (NOT CMAKE_C_COMPILER_ID MATCHES Clang)
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-z,relro,-z,now")
+  endif ()
+
   include(CheckFunctionExists)
 
   check_function_exists(memset_s HAVE_MEMSET_S)
@@ -155,59 +160,31 @@ else()
   endif ()
 
   find_package (PkgConfig REQUIRED)
-  if (${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
-    if (NOT LIBCRYPTO_LDFLAGS)
-      set (LIBCRYPTO_LDFLAGS "-lcrypto")
-    endif()
-    if (NOT LIBCRYPTO_VERSION)
-      set (LIBCRYPTO_VERSION "1.1.1")
-    endif()
-  else()
-    include(${CMAKE_SOURCE_DIR}/cmake/openssl.cmake)
-    find_libcrypto()
-  endif()
+  pkg_search_module (LIBCRYPTO REQUIRED libcrypto)
   if(NOT BUILD_ONLY_LIB)
-    if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
-      set (LIBEDIT_LDFLAGS "-ledit")
-    else()
-      pkg_search_module (LIBEDIT REQUIRED libedit)
-    endif()
+    pkg_search_module (LIBEDIT REQUIRED libedit)
   endif()
   pkg_search_module (LIBCURL REQUIRED libcurl)
   pkg_search_module (LIBUSB REQUIRED libusb-1.0)
 endif()
-
-message("LIBCRYPTO_VERSION: ${LIBCRYPTO_VERSION}")
-
-# If disabled, make sure to make the 'ykhsmauth-label' option in src/cmdline.ggo invisible
-option(ENABLE_YKHSM_AUTH "Enable/disable ykhsmauth module" ON)
-if(ENABLE_YKHSM_AUTH)
-  add_definitions(-DYKHSMAUTH_ENABLED="1")
-endif()
-
-option(ENABLE_EXPERIMENTAL_ASYMMETRIC_AUTH "Enable support for experimental asymmetric authentication" OFF)
 
 add_subdirectory (lib)
 
 if(NOT BUILD_ONLY_LIB)
   add_subdirectory (pkcs11)
 
-  if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+  if (ENABLE_EXPERIMENTAL_YKYH)
     pkg_search_module (LIBPCSC REQUIRED libpcsclite)
-  elseif(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
-    set (LIBPCSC_LDFLAGS "winscard.lib")
-  elseif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
-    set(LIBPCSC_LDFLAGS "-Wl,-framework -Wl,PCSC")
-  endif()
-
-  if(ENABLE_YKHSM_AUTH)
-    add_subdirectory (ykhsmauth)
-    add_subdirectory (yubihsm-auth)
+    add_subdirectory (ykyh)
   endif()
 
   add_subdirectory (src)
 
   add_subdirectory (examples)
+
+  if (ENABLE_EXPERIMENTAL_YKYH)
+    add_subdirectory (yhauth)
+  endif()
 
   add_subdirectory(yhwrap)
 endif()
@@ -215,7 +192,7 @@ endif()
 add_custom_target (
   cppcheck
   COMMENT "Running cppcheck"
-  COMMAND cppcheck
+  COMMAND /usr/bin/cppcheck
   --enable=warning,style,unusedFunction,missingInclude
   --template="[{severity}][{id}] {message} {callstack} \(On {file}:{line}\)"
   -i ${CMAKE_SOURCE_DIR}/src/cmdline.c
@@ -233,27 +210,3 @@ add_custom_target (
   )
 
 coverage_evaluate()
-
-
-message("Build summary:")
-message("")
-message("        Project name:     ${CMAKE_PROJECT_NAME}")
-message("        Version:          ${VERSION}")
-message("        Host type:        ${CMAKE_SYSTEM_NAME}")
-message("        Path prefix:      ${CMAKE_PREFIX_PATH}")
-message("        Compiler:         ${CMAKE_C_COMPILER}")
-message("        Compiler ID:      ${CMAKE_C_COMPILER_ID}")
-message("        Compiler version: ${CMAKE_C_COMPILER_VERSION}")
-message("        CMake version:    ${CMAKE_VERSION}")
-message("        CFLAGS:           ${CMAKE_C_FLAGS}")
-message("        CPPFLAGS:         ${CMAKE_CXX_FLAGS}")
-message("        Warnings:         ${WARN_FLAGS}")
-message("        Build type:       ${CMAKE_BUILD_TYPE}")
-message("")
-message("        Install prefix:    ${CMAKE_INSTALL_PREFIX}")
-message("        Install targets")
-message("             Libraries     ${YUBIHSM_INSTALL_LIB_DIR}")
-message("             Includes      ${YUBIHSM_INSTALL_INC_DIR}")
-message("             Binaries      ${YUBIHSM_INSTALL_BIN_DIR}")
-message("             Manuals       ${YUBIHSM_INSTALL_MAN_DIR}")
-message("             Pkg-config    ${YUBIHSM_INSTALL_PKGCONFIG_DIR}")

@@ -59,12 +59,11 @@ union _Msg {
     uint16_t len;
     uint8_t data[SCP_MSG_BUF_SIZE];
   } st;
-  uint8_t raw[SCP_MSG_BUF_SIZE + 3];
+  uint8_t raw[3 + SCP_MSG_BUF_SIZE];
 };
 #pragma pack(pop)
 
 typedef union _Msg Msg;
-struct yh_connector;
 
 typedef struct {
   uint8_t sid;
@@ -73,8 +72,8 @@ typedef struct {
   uint8_t s_rmac[SCP_KEY_LEN];
   uint8_t mac_chaining_value[SCP_PRF_LEN];
   uint8_t ctr[SCP_PRF_LEN];
-  char identifier[17];
-  struct yh_connector *parent;
+  bool in_use;
+  bool authenticated;
 } Scp_ctx;
 
 #endif

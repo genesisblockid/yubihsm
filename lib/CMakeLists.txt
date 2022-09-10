@@ -14,13 +14,6 @@
 # limitations under the License.
 #
 
-include(${CMAKE_SOURCE_DIR}/cmake/openssl.cmake)
-find_libcrypto()
-
-if(MSVC)
-set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
-endif()
-
 set (
   SOURCE
   ${CMAKE_CURRENT_SOURCE_DIR}/../aes_cmac/aes.c
@@ -28,26 +21,19 @@ set (
   ${CMAKE_CURRENT_SOURCE_DIR}/../common/hash.c
   ${CMAKE_CURRENT_SOURCE_DIR}/../common/pkcs5.c
   ${CMAKE_CURRENT_SOURCE_DIR}/../common/rand.c
-  ${CMAKE_CURRENT_SOURCE_DIR}/../common/ecdh.c
-  ${CMAKE_CURRENT_SOURCE_DIR}/../common/openssl-compat.c
   error.c
   lib_util.c
   yubihsm.c
 )
-
-if(MSVC)
-  set(SOURCE ${SOURCE} ${CMAKE_CURRENT_SOURCE_DIR}/../common/time_win.c)
-endif(MSVC)
 set(STATIC_SOURCE ${SOURCE})
 
-if(WIN32)
-  set(ADDITIONAL_LIBRARY ws2_32)
+if(${WIN32})
+  set(ADDITIONAL_LIBRARY -lws2_32)
   set (
     HTTP_SOURCE
     yubihsm_winhttp.c
     lib_util.c
     ${CMAKE_CURRENT_BINARY_DIR}/version_winhttp.rc
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common/time_win.c
     )
   set (
     USB_SOURCE
@@ -55,13 +41,11 @@ if(WIN32)
     yubihsm_winusb.c
     lib_util.c
     ${CMAKE_CURRENT_BINARY_DIR}/version_winusb.rc
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common/time_win.c
     )
-  set(HTTP_LIBRARY winhttp ws2_32)
-  set(USB_LIBRARY winusb ws2_32 setupapi)
-
+  set(HTTP_LIBRARY -lwinhttp -lws2_32)
+  set(USB_LIBRARY -lwinusb -lws2_32 -lsetupapi)
   if(${WIN32_BCRYPT})
-    set (CRYPT_LIBRARY bcrypt)
+    set (CRYPT_LIBRARY -lbcrypt)
     add_definitions (-D_WIN32_BCRYPT)
   else(${WIN32_BCRYPT})
     set(CRYPT_LIBRARY ${LIBCRYPTO_LDFLAGS})
@@ -69,7 +53,7 @@ if(WIN32)
   list(APPEND SOURCE ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
 
   list(APPEND STATIC_SOURCE yubihsm_winusb.c yubihsm_usb.c yubihsm_winhttp.c)
-else(WIN32)
+else(${WIN32})
   set(ADDITIONAL_LIBRARY -ldl)
   set (
     USB_SOURCE
@@ -87,12 +71,11 @@ else(WIN32)
   set(CRYPT_LIBRARY ${LIBCRYPTO_LDFLAGS})
 
   list(APPEND STATIC_SOURCE yubihsm_libusb.c yubihsm_usb.c yubihsm_curl.c)
-endif(WIN32)
+endif(${WIN32})
 
 include_directories (
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${LIBCRYPTO_INCLUDEDIR}
-  ${LIBCURL_INCLUDEDIR}
 )
 
 add_library (yubihsm SHARED ${SOURCE})
@@ -103,15 +86,6 @@ set_target_properties(yubihsm PROPERTIES BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
 set_target_properties (yubihsm PROPERTIES VERSION "${yubihsm_shell_VERSION_MAJOR}.${yubihsm_shell_VERSION_MINOR}.${yubihsm_shell_VERSION_PATCH}" SOVERSION ${yubihsm_shell_VERSION_MAJOR})
 set_target_properties (yubihsm_usb PROPERTIES VERSION "${yubihsm_shell_VERSION_MAJOR}.${yubihsm_shell_VERSION_MINOR}.${yubihsm_shell_VERSION_PATCH}" SOVERSION ${yubihsm_shell_VERSION_MAJOR})
 set_target_properties (yubihsm_http PROPERTIES VERSION "${yubihsm_shell_VERSION_MAJOR}.${yubihsm_shell_VERSION_MINOR}.${yubihsm_shell_VERSION_PATCH}" SOVERSION ${yubihsm_shell_VERSION_MAJOR})
-if(MSVC)
-  set_target_properties(yubihsm PROPERTIES OUTPUT_NAME libyubihsm)
-  set_target_properties(yubihsm_usb PROPERTIES OUTPUT_NAME libyubihsm_usb)
-  set_target_properties(yubihsm_http PROPERTIES OUTPUT_NAME libyubihsm_http)
-else(MSVC)
-  set_target_properties(yubihsm PROPERTIES OUTPUT_NAME yubihsm)
-  set_target_properties(yubihsm_usb PROPERTIES OUTPUT_NAME yubihsm_usb)
-  set_target_properties(yubihsm_http PROPERTIES OUTPUT_NAME yubihsm_http)
-endif(MSVC)
 
 if (ENABLE_STATIC)
   add_library (yubihsm_static STATIC ${STATIC_SOURCE})
@@ -146,13 +120,12 @@ if(ENABLE_STATIC)
 endif(ENABLE_STATIC)
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/yubihsm.pc.in ${CMAKE_CURRENT_BINARY_DIR}/yubihsm.pc @ONLY)
-configure_file(${CMAKE_SOURCE_DIR}/common/platform-config.h.in ${CMAKE_SOURCE_DIR}/common/platform-config.h @ONLY)
 
-if(WIN32)
+if(${WIN32})
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version.rc @ONLY)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version_winhttp.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version_winhttp.rc @ONLY)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version_winusb.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version_winusb.rc @ONLY)
-endif(WIN32)
+endif(${WIN32})
 
 install(
   TARGETS yubihsm
@@ -236,11 +209,6 @@ add_test(
 add_test(
   NAME echo
   COMMAND echo
-  )
-
-add_test(
-  NAME asym_auth
-  COMMAND asym_auth
   )
 
 add_test(

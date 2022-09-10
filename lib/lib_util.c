@@ -24,21 +24,11 @@
 #include "internal.h"
 #include "debug_lib.h"
 
-#ifdef __WIN32
-#include <winsock.h>
-#else
-#include <arpa/inet.h>
-#endif
-
 #define STATUS_STR "status="
 #define VERSION_STR "version="
 #define PID_STR "pid="
 #define ADDRESS_STR "address="
 #define PORT_STR "port="
-
-#ifdef _MSVC
-#define strtok_r strtok_s
-#endif
 
 void dump_hex(FILE *file, const uint8_t *ptr, uint16_t len) {
 
@@ -54,20 +44,20 @@ void dump_hex(FILE *file, const uint8_t *ptr, uint16_t len) {
 
 void dump_msg(FILE *file, const Msg *msg) {
 
-  fprintf(file, "SEND >> (03 + %04d) %02x %04x ", ntohs(msg->st.len),
-          msg->st.cmd, ntohs(msg->st.len));
+  fprintf(file, "SEND >> (03 + %04d) %02x %04x ", msg->st.len, msg->st.cmd,
+          msg->st.len);
 
-  dump_hex(file, msg->st.data, ntohs(msg->st.len));
+  dump_hex(file, msg->st.data, msg->st.len);
 
   fprintf(file, "\n");
 }
 
 void dump_response(FILE *file, const Msg *msg) {
 
-  fprintf(file, "RECV << (03 + %04d) %02x %04x ", ntohs(msg->st.len),
-          msg->st.cmd, ntohs(msg->st.len));
+  fprintf(file, "RECV << (03 + %04d) %02x %04x ", msg->st.len, msg->st.cmd,
+          msg->st.len);
 
-  dump_hex(file, msg->st.data, ntohs(msg->st.len));
+  dump_hex(file, msg->st.data, msg->st.len);
 
   fprintf(file, " \n");
 }
@@ -163,19 +153,17 @@ bool parse_usb_url(const char *url, unsigned long *serial) {
         str += strlen("serial=");
 
         errno = 0;
-        *serial = strtoul(str, &endptr, 10);
+        *serial = strtoul(str, &endptr, 0);
         if ((errno == ERANGE && *serial == ULONG_MAX) || endptr == str ||
-            *endptr != '\0' || (errno != 0 && *serial == 0)) {
+            (errno != 0 && *serial == 0)) {
           *serial = 0;
-          DBG_ERR("Failed to parse serial argument: '%s'.", str);
-          free(copy);
-          return false;
+          DBG_INFO("Failed to parse serial argument: '%s'.", str);
         }
       } else {
         DBG_INFO("Unknown USB option '%s'.", str);
       }
     }
-    DBG_INFO("USB url parsed with serial decimal %lu.", *serial);
+    DBG_INFO("USB url parsed with serial %lu.", *serial);
     free(copy);
     return true;
   }

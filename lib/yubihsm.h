@@ -30,10 +30,11 @@
  First step of using a YubiHSM 2 is to initialize the library with #yh_init(),
  initialize a connector with #yh_init_connector() and then connect it to the
  YubiHSM 2 with #yh_connect(). After this, a session must be established with
- #yh_create_session_derived(), #yh_create_session(),
- #yh_begin_create_session() + yh_finish_create_session().
+ #yh_create_session_derived(), #yh_create_session() or
+ #yh_begin_create_session_ext(). The session must then be authenticated using
+ #yh_authenticate_session().
 
- When a session is established, commands can be exchanged over it. The
+ When a session is authenticated, commands can be exchanged over it. The
  functions in the namespace yh_util are high-level convenience functions that do
  specific tasks with the device.
 
@@ -58,6 +59,7 @@
    assert(yh_connect(connector, 0) == YHR_SUCCESS);
    assert(yh_create_session_derived(connector, 1, YH_DEFAULT_PASSWORD,
    strlen(YH_DEFAULT_PASSWORD), false, &session) == YHR_SUCCESS);
+   assert(yh_authenticate_session(session) == YHR_SUCCESS);
    assert(yh_util_get_pseudo_random(session, sizeof(data), data,
  &data_len)==YHR_SUCCESS);
    assert(data_len == sizeof(data));
@@ -145,8 +147,6 @@
 /// This is the overhead when doing aes-ccm wrapping: 1 byte identifier, 13
 /// bytes nonce and 16 bytes mac
 #define YH_CCM_WRAP_OVERHEAD (1 + 13 + 16)
-#define YH_EC_P256_PRIVKEY_LEN 32
-#define YH_EC_P256_PUBKEY_LEN 65
 
 #ifdef __cplusplus
 extern "C" {
@@ -232,8 +232,6 @@ typedef enum {
   YHR_CONNECTOR_ERROR = -29,
   /// Return value when encountering SSH CA constraint violation
   YHR_DEVICE_SSH_CA_CONSTRAINT_VIOLATION = -30,
-  /// Return value when an algorithm is disabled
-  YHR_DEVICE_ALGORITHM_DISABLED = -31,
 } yh_rc;
 
 /// Macro to define command and response command
@@ -255,8 +253,6 @@ typedef enum {
   ADD_COMMAND(YHC_GET_DEVICE_INFO, 0x06),
   /// Factory reset a device
   ADD_COMMAND(YHC_RESET_DEVICE, 0x08),
-  /// Get the device pubkey for asym auth
-  ADD_COMMAND(YHC_GET_DEVICE_PUBKEY, 0x0a),
   /// Close session
   ADD_COMMAND(YHC_CLOSE_SESSION, 0x40),
   /// Get storage information
@@ -486,10 +482,6 @@ typedef enum {
   YH_ALGO_EC_ED25519 = 46,
   /// ecp224
   YH_ALGO_EC_P224 = 47,
-  /// rsa-pkcs1-decrypt
-  YH_ALGO_RSA_PKCS1_DECRYPT = 48,
-  /// ec-p256-yubico-authentication
-  YH_ALGO_EC_P256_YUBICO_AUTHENTICATION = 49,
 } yh_algorithm;
 
 /**
@@ -500,10 +492,6 @@ typedef enum {
   YH_OPTION_FORCE_AUDIT = 1,
   /// Enable/Disable logging of specific commands
   YH_OPTION_COMMAND_AUDIT = 3,
-  /// Toggle algorithms on/off
-  YH_OPTION_ALGORITHM_TOGGLE = 4,
-  /// Fips mode on/off
-  YH_OPTION_FIPS_MODE = 5,
 } yh_option;
 
 /**
@@ -516,15 +504,6 @@ typedef enum {
   /// Proxy server to use for connecting to the connector (const char *). Not
   /// implemented on Windows
   YH_CONNECTOR_PROXY_SERVER = 2,
-  /// File with client certificate to authenticate client with (const char *).
-  /// Not implemented on Windows
-  YH_CONNECTOR_HTTPS_CERT = 3,
-  /// File with client certificates key (const char *).
-  /// Not implemented on Windows
-  YH_CONNECTOR_HTTPS_KEY = 4,
-  /// Comma separated list of hosts ignoring proxy, `*` to disable proxy.
-  /// Not implemented on Windows
-  YH_CONNECTOR_NOPROXY = 5,
 } yh_connector_option;
 
 #pragma pack(push, 1)
@@ -575,8 +554,7 @@ typedef struct {
   uint8_t sequence;
   /// Object origin
   uint8_t origin;
-  /// Object label. The label consists of raw bytes and is not restricted to
-  /// printable characters or valid UTF-8 glyphs
+  /// Object label
   char label[YH_OBJ_LABEL_LEN + 1];
   /// Object delegated capabilities
   yh_capabilities delegated_capabilities;
@@ -658,7 +636,6 @@ static const struct {
   {"eck256", YH_ALGO_EC_K256},
   {"ecp224", YH_ALGO_EC_P224},
   {"ecp256", YH_ALGO_EC_P256},
-  {"ecp256-yubico-authentication", YH_ALGO_EC_P256_YUBICO_AUTHENTICATION},
   {"ecp384", YH_ALGO_EC_P384},
   {"ecp521", YH_ALGO_EC_P521},
   {"ed25519", YH_ALGO_EC_ED25519},
@@ -676,7 +653,6 @@ static const struct {
   {"rsa-oaep-sha256", YH_ALGO_RSA_OAEP_SHA256},
   {"rsa-oaep-sha384", YH_ALGO_RSA_OAEP_SHA384},
   {"rsa-oaep-sha512", YH_ALGO_RSA_OAEP_SHA512},
-  {"rsa-pkcs1-decrypt", YH_ALGO_RSA_PKCS1_DECRYPT},
   {"rsa-pkcs1-sha1", YH_ALGO_RSA_PKCS1_SHA1},
   {"rsa-pkcs1-sha256", YH_ALGO_RSA_PKCS1_SHA256},
   {"rsa-pkcs1-sha384", YH_ALGO_RSA_PKCS1_SHA384},
@@ -710,8 +686,6 @@ static const struct {
 } yh_options[] = {
   {"command-audit", YH_OPTION_COMMAND_AUDIT},
   {"force-audit", YH_OPTION_FORCE_AUDIT},
-  {"algorithm-toggle", YH_OPTION_ALGORITHM_TOGGLE},
-  {"fips-mode", YH_OPTION_FIPS_MODE},
 };
 
 /// The object was generated on the device
@@ -914,10 +888,10 @@ yh_rc yh_create_session_derived(yh_connector *connector, uint16_t authkey_id,
  * @param connector Connector to the device
  * @param authkey_id Object ID of the Authentication Key used to authenticate
  *the session
- * @param key_enc Key used to derive the session encryption key
- * @param key_enc_len Length of key_enc
- * @param key_mac Key used to derive the session MAC keys
- * @param key_mac_len Length of key_mac
+ * @param key_enc Encryption key used to derive the session encryption key
+ * @param key_enc_len Length of the encryption key.
+ * @param key_mac MAC key used to derive the session MAC key
+ * @param key_mac_len Length of the MAC key.
  * @param recreate_session If true, the session will be recreated if expired.
  *This caches the password in memory
  * @param session created session
@@ -938,49 +912,17 @@ yh_rc yh_create_session(yh_connector *connector, uint16_t authkey_id,
                         bool recreate_session, yh_session **session);
 
 /**
- * Create a session that uses named encryption keys from a platform-specific key
- *store to derive session-specific keys
+ * Begin creating an external session. The session's encryption key and MAC key
+ *are not stored in the device.
  *
- * @param connector Connector to the device
- * @param authkey_id Object ID of the Authentication Key used to authenticate
- *the session
- * @param key_enc_name Name of key used to derive the session encryption key
- * @param key_mac_name Name of key used to derive the session MAC keys
- * @param session created session
- *
- * @return #YHR_SUCCESS if successful.
- *         #YHR_INVALID_PARAMETERS if input parameters are NULL or incorrect.
- *         See #yh_rc for other possible errors
- *
- * @see <a
- *href="https://developers.yubico.com/YubiHSM2/Concepts/Session.html">Session</a>,
- * <a
- *href="https://developers.yubico.com/YubiHSM2/Concepts/Object.html">Authentication
- *Key</a>
- **/
-yh_rc yh_create_session_ex(yh_connector *connector, uint16_t authkey_id,
-                           const char *key_enc_name, const char *key_mac_name,
-                           yh_session **session);
-
-/**
- * Begin creating a session where the session keys are calculated outside the
- *library.
- *
- * This function must be followed by yh_finish_create_session() to set the
- * session keys.
- *
- * If host_challenge_len is 0 when calling this function an 8 byte random
- *challenge is generated, and symmetric authentication is assumed.
- *
- * For asymmetric authentication the host challenge must be provided.
+ * This function must be followed by yh_finish_create_session_ext() to set the
+ *session keys.
  *
  * @param connector Connector to the device
  * @param authkey_id Object ID of the Authentication Key used to authenticate
  *the session
  * @param context pointer to where context data is saved
- * @param host_challenge Host challenge
- * @param host_challenge_len Length of host challenge
- * @param card_cryptogram Card cryptogram from the device
+ * @param card_cryptogram Card cryptogram
  * @param card_cryptogram_len Length of card cryptogram
  * @param session created session
  *
@@ -992,25 +934,19 @@ yh_rc yh_create_session_ex(yh_connector *connector, uint16_t authkey_id,
  * @see <a
  *href="https://developers.yubico.com/YubiHSM2/Concepts/Session.html">Session</a>
  **/
-yh_rc yh_begin_create_session(yh_connector *connector, uint16_t authkey_id,
-                              uint8_t **context, uint8_t *host_challenge,
-                              size_t *host_challenge_len,
-                              uint8_t *card_cryptogram,
-                              size_t *card_cryptogram_len,
-                              yh_session **session);
+yh_rc yh_begin_create_session_ext(yh_connector *connector, uint16_t authkey_id,
+                                  uint8_t **context, uint8_t *card_cryptogram,
+                                  size_t card_cryptogram_len,
+                                  yh_session **session);
 
 /**
- * Finish creating a session.
+ * Finish creating external session. The session's encryption key and MAC key
+ *are not stored in the device.
  *
- * This function must be called after yh_begin_create_session().
+ * This function must be called after yh_begin_create_session_ext().
  *
- * For symmetric authentication this function will authenticate the session
- * with the device using the provided sesion keys and card cryptogram.
- *
- * For asymmetric authentication the card cryptogram must be validated
- *externally.
- *
- * @param session The session created with yh_begin_create_session()
+ * @param connector Connector to the device
+ * @param session The session created with yh_begin_create_session_ext()
  * @param key_senc Session encryption key used to encrypt the messages exchanged
  *with the device
  * @param key_senc_len Lenght of the encryption key. Must be #YH_KEY_LEN
@@ -1031,100 +967,13 @@ yh_rc yh_begin_create_session(yh_connector *connector, uint16_t authkey_id,
  * @see <a
  *href="https://developers.yubico.com/YubiHSM2/Concepts/Session.html">Session</a>
  **/
-yh_rc yh_finish_create_session(yh_session *session, const uint8_t *key_senc,
-                               size_t key_senc_len, const uint8_t *key_smac,
-                               size_t key_smac_len, const uint8_t *key_srmac,
-                               size_t key_srmac_len, uint8_t *card_cryptogram,
-                               size_t card_cryptogram_len);
-
-/**
- * Utility function that gets the value and algorithm of the device public key
- *
- * @param connector Connector to the device
- * @param device_pubkey Value of the public key
- * @param device_pubkey_len Length of the public key in bytes
- * @param algorithm Algorithm of the key.
- *
- * @return #YHR_SUCCESS if successful.
- *         #YHR_INVALID_PARAMETERS if input parameters are NULL.
- *         #YHR_BUFFER_TOO_SMALL if the actual key length was bigger than
- *device_pubkey_len. See #yh_rc for other possible errors
- **/
-yh_rc yh_util_get_device_pubkey(yh_connector *connector, uint8_t *device_pubkey,
-                                size_t *device_pubkey_len,
-                                yh_algorithm *algorithm);
-
-/**
- * Utility function that derives an ec-p256 key pair from a password using the
- *following algorithm
- *
- * 1. Apply pkcs5_pbkdf2_hmac-sha256 on the password to derive a pseudo-random
- *private ec-p256 key
- * 2. Check that the derived key is a valid ec-p256 private key
- * 3. If not valid append a byte with the value 1 (2, 3, 4 etc for additional
- *failures) to the password and go to step 1
- * 4. Calculate the corresponding public key from the private key and the
- *ec-p256 curve paramaters
- *
- * @param password The password bytes
- * @param password_len The password length
- * @param privkey Value of the private key
- * @param privkey_len Length of the private key in bytes
- * @param pubkey Value of the public key
- * @param pubkey_len Length of the public key in bytes
- *
- * @return #YHR_SUCCESS if successful.
- *         #YHR_INVALID_PARAMETERS if input parameters are NULL. See #yh_rc for
- *other possible errors
- **/
-yh_rc yh_util_derive_ec_p256_key(const uint8_t *password, size_t password_len,
-                                 uint8_t *privkey, size_t privkey_len,
-                                 uint8_t *pubkey, size_t pubkey_len);
-
-/**
- * Utility function that generates a random ec-p256 key pair
- *
- * @param privkey Value of the private key
- * @param privkey_len Length of the private key in bytes
- * @param pubkey Value of the public key
- * @param pubkey_len Length of the public key in bytes
- *
- * @return #YHR_SUCCESS if successful.
- *         #YHR_INVALID_PARAMETERS if input parameters are NULL. See #yh_rc for
- *other possible errors
- **/
-yh_rc yh_util_generate_ec_p256_key(uint8_t *privkey, size_t privkey_len,
-                                   uint8_t *pubkey, size_t pubkey_len);
-
-/**
- * Create a session that uses the specified asymmetric key to derive
- *session-specific keys.
- *
- * @param connector Connector to the device
- * @param authkey_id Object ID of the Asymmetric Authentication Key used to
- *authenticate the session
- * @param privkey Private key of the client, used to derive the session
- *encryption key and authenticate the client
- * @param privkey_len Length of the private key.
- * @param device_pubkey Public key of the device, used to derive the session
- *encryption key and authenticate the device
- * @param device_pubkey_len Length of the device public key.
- * @param session created session
- *
- * @return #YHR_SUCCESS if successful.
- *         #YHR_INVALID_PARAMETERS if input parameters are NULL or incorrect.
- *         See #yh_rc for other possible errors
- *
- * @see <a
- *href="https://developers.yubico.com/YubiHSM2/Concepts/Session.html">Session</a>,
- * <a
- *href="https://developers.yubico.com/YubiHSM2/Concepts/Object.html">Authentication
- *Key</a>
- **/
-yh_rc yh_create_session_asym(yh_connector *connector, uint16_t authkey_id,
-                             const uint8_t *privkey, size_t privkey_len,
-                             const uint8_t *device_pubkey,
-                             size_t device_pubkey_len, yh_session **session);
+yh_rc yh_finish_create_session_ext(yh_connector *connector, yh_session *session,
+                                   const uint8_t *key_senc, size_t key_senc_len,
+                                   const uint8_t *key_smac, size_t key_smac_len,
+                                   const uint8_t *key_srmac,
+                                   size_t key_srmac_len,
+                                   uint8_t *card_cryptogram,
+                                   size_t card_cryptogram_len);
 
 /**
  * Free data associated with the session
@@ -1140,26 +989,17 @@ yh_rc yh_create_session_asym(yh_connector *connector, uint16_t authkey_id,
 yh_rc yh_destroy_session(yh_session **session);
 
 /**
- * Deprecated, use yh_begin_create_session instead.
- **/
-yh_rc yh_begin_create_session_ext(yh_connector *connector, uint16_t authkey_id,
-                                  uint8_t **context, uint8_t *card_cryptogram,
-                                  size_t card_cryptogram_len,
-                                  yh_session **session);
-
-/**
- * Deprecated, use yh_finish_create_session instead.
- **/
-yh_rc yh_finish_create_session_ext(yh_connector *connector, yh_session *session,
-                                   const uint8_t *key_senc, size_t key_senc_len,
-                                   const uint8_t *key_smac, size_t key_smac_len,
-                                   const uint8_t *key_srmac,
-                                   size_t key_srmac_len,
-                                   uint8_t *card_cryptogram,
-                                   size_t card_cryptogram_len);
-
-/**
- * Deprecated, calling this function has no effect.
+ * Authenticate session
+ *
+ * @param session Session to authenticate
+ *
+ * @return #YHR_SUCCESS if successful.
+ *         #YHR_INVALID_PARAMETERS if the session is NULL.
+ *         #YHR_SESSION_AUTHENTICATION_FAILED if the session fails to
+ *authenticate. See #yh_rc for other possible errors
+ *
+ * @see <a
+ *href="https://developers.yubico.com/YubiHSM2/Concepts/Session.html">Session</a>
  **/
 yh_rc yh_authenticate_session(yh_session *session);
 
@@ -1648,9 +1488,8 @@ yh_rc yh_util_decrypt_pkcs1v1_5(yh_session *session, uint16_t key_id,
  * @param in_len Length of encrypted data. Must be 256, 384 or 512
  * @param out Decrypted data
  * @param out_len Length of decrypted data
- * @param label Hash of OAEP label. Hash function must be SHA-1, SHA-256,
- *SHA-384 or SHA-512
- * @param label_len Length of hash of OAEP label. Must be 20, 32, 48 or 64
+ * @param label OAEP label
+ * @param label_len Length of OAEP label. Must be 20, 32, 48 or 64
  * @param mgf1Algo MGF1 algorithm
  *
  * @return #YHR_SUCCESS if successful.
@@ -2110,27 +1949,6 @@ yh_rc yh_util_decrypt_otp(yh_session *session, uint16_t key_id,
                           const uint8_t *aead, size_t aead_len,
                           const uint8_t *otp, uint16_t *useCtr,
                           uint8_t *sessionCtr, uint8_t *tstph, uint16_t *tstpl);
-
-/**
- * Rewrap an OTP AEAD from one #YH_OTP_AEAD_KEY to another.
- *
- * @param session Authenticated session to use
- * @param id_from Object ID of the AEAD Key to wrap from.
- * @param id_to Object ID of the AEAD Key to wrap to.
- * @param aead_in AEAD to unwrap
- * @param in_len Length of AEAD
- * @param aead_out The created AEAD
- * @param out_len Length of output AEAD
- *
- * @return #YHR_SUCCESS if successful.
- *         #YHR_INVALID_PARAMETERS if input parameters are NULL.
- *         See #yh_rc for other possible errors
- **/
-
-yh_rc yh_util_rewrap_otp_aead(yh_session *session, uint16_t id_from,
-                              uint16_t id_to, const uint8_t *aead_in,
-                              size_t in_len, uint8_t *aead_out,
-                              size_t *out_len);
 
 /**
  * Import an #YH_OTP_AEAD_KEY used for Yubico OTP Decryption
@@ -2709,10 +2527,6 @@ yh_rc yh_string_to_domains(const char *domains, uint16_t *result);
 yh_rc yh_domains_to_string(uint16_t domains, char *string, size_t max_len);
 #ifdef __cplusplus
 }
-#endif
-
-#ifdef _MSC_VER
-#pragma strict_gs_check(on)
 #endif
 
 #endif

@@ -20,12 +20,7 @@
 #include "pkcs11y.h"
 #include "list.h"
 #include <openssl/evp.h>
-#include "../common/platform-config.h"
-
-#ifndef _MSVC
 #include <sys/time.h>
-#endif
-#include <time.h>
 
 #define YUBIHSM_PKCS11_OP_BUFSIZE 4096
 #define MAX_ECDH_SESSION_KEYS 255
@@ -62,7 +57,7 @@ typedef enum {
 
 typedef struct {
   yh_object_descriptor objects[YH_MAX_ITEMS_COUNT];
-  size_t current_object;
+  uint16_t current_object;
   size_t n_objects;
   bool only_private;
 } find_info;
@@ -88,11 +83,6 @@ typedef struct {
 
 typedef struct {
   uint16_t key_id;
-  CK_ULONG padding; // RSA padding, 0 for EC
-  const EVP_MD *oaep_md;
-  const EVP_MD *mgf1_md;
-  unsigned char *oaep_label;
-  CK_ULONG oaep_label_len;
 } encrypt_info;
 
 typedef struct {
@@ -150,7 +140,6 @@ typedef struct {
 
 typedef struct {
   List slots;
-  List device_pubkeys;
   CK_CREATEMUTEX create_mutex;
   CK_DESTROYMUTEX destroy_mutex;
   CK_LOCKMUTEX lock_mutex;
@@ -206,9 +195,5 @@ typedef struct {
     uint8_t *buf;
   } obj;
 } yubihsm_pkcs11_object_template;
-
-#ifdef _MSC_VER
-#pragma strict_gs_check(on)
-#endif
 
 #endif

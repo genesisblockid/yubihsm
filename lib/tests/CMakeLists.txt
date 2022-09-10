@@ -14,9 +14,11 @@
 # limitations under the License.
 #
 
-if(MSVC)
-  set(ADDITIONAL_LIBRARY ws2_32)
-endif(MSVC)
+if (CMAKE_C_COMPILER_ID MATCHES Clang)
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIE")
+else ()
+  set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIE -pie")
+endif ()
 
 set (
   SOURCE_PARSING
@@ -35,17 +37,13 @@ set (
   test_usb_url.c
   ../lib_util.c
   )
-if(MSVC)
-  set(SOURCE_USB_URL ${SOURCE_USB_URL} ../../common/time_win.c)
-endif(MSVC)
+
 set (
   SOURCE_UTIL
   test_util.c
   ../lib_util.c
   )
-if(MSVC)
-  set(SOURCE_UTIL ${SOURCE_UTIL} ../../common/time_win.c)
-endif(MSVC)
+
 include_directories (
   ${CMAKE_CURRENT_SOURCE_DIR}/../lib
   )
@@ -68,7 +66,3 @@ target_link_libraries (
   # this doesn't really need libyubihsm, needs openssl/windows whatever
   yubihsm
   )
-
-target_link_libraries (test_usb_url ${ADDITIONAL_LIBRARY})
-
-target_link_libraries (test_util ${ADDITIONAL_LIBRARY})

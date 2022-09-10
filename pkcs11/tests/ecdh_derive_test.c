@@ -18,6 +18,7 @@
 #undef NDEBUG
 #endif
 #include <assert.h>
+#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +28,10 @@
 #include <openssl/x509.h>
 
 #include "../pkcs11.h"
-#include "common.h"
+
+#ifndef DEFAULT_CONNECTOR_URL
+#define DEFAULT_CONNECTOR_URL "http://127.0.0.1:12345"
+#endif
 
 #define BUFSIZE 1024
 
@@ -37,20 +41,102 @@ CK_BYTE P256_PARAMS[] = {0x06, 0x08, 0x2a, 0x86, 0x48,
 CK_BYTE P384_PARAMS[] = {0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22};
 CK_BYTE P521_PARAMS[] = {0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23};
 
-static CK_FUNCTION_LIST_PTR p11;
-static CK_SESSION_HANDLE session;
+CK_FUNCTION_LIST_PTR p11;
+CK_SESSION_HANDLE session;
 
-char *CURVES[] = {"secp224r1", "prime256v1", "secp384r1", "secp521r1"};
-CK_BYTE *CURVE_PARAMS[] = {P224_PARAMS, P256_PARAMS, P384_PARAMS, P521_PARAMS};
-CK_ULONG CURVE_LENS[] = {sizeof(P224_PARAMS), sizeof(P256_PARAMS),
-                         sizeof(P384_PARAMS), sizeof(P521_PARAMS)};
-int CURVE_COUNT = sizeof(CURVE_PARAMS) / sizeof(CURVE_PARAMS[0]);
+char *CURVES[] = {"secp224r1", "secp384r1", "secp521r1"};
+CK_BYTE *CURVE_PARAMS[] = {P224_PARAMS, P384_PARAMS, P521_PARAMS};
+int CURVE_COUNT = 3;
+
+static void get_function_list(char *argv[]) {
+  void *handle = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
+  assert(handle != NULL);
+  CK_C_GetFunctionList fn;
+
+  *(void **) (&fn) = dlsym(handle, "C_GetFunctionList");
+  assert(fn != NULL);
+
+  CK_RV rv = ((CK_C_GetFunctionList) fn)(&p11);
+  assert(rv == CKR_OK);
+}
+
+static void open_session() {
+  CK_C_INITIALIZE_ARGS initArgs;
+  memset(&initArgs, 0, sizeof(initArgs));
+
+  const char *connector_url;
+  connector_url = getenv("DEFAULT_CONNECTOR_URL");
+  if (connector_url == NULL) {
+    connector_url = DEFAULT_CONNECTOR_URL;
+  }
+  char config[256];
+  assert(strlen(connector_url) + strlen("connector=") < 256);
+  sprintf(config, "connector=%s", connector_url);
+  initArgs.pReserved = (void *) config;
+  CK_RV rv = p11->C_Initialize(&initArgs);
+  assert(rv == CKR_OK);
+
+  rv = p11->C_OpenSession(0, CKF_SERIAL_SESSION | CKF_RW_SESSION, NULL, NULL,
+                          &session);
+  assert(rv == CKR_OK);
+
+  const char *password = "0001password";
+  rv = p11->C_Login(session, CKU_USER, (CK_UTF8CHAR_PTR) password,
+                    (CK_ULONG) strlen(password));
+  assert(rv == CKR_OK);
+  printf("Session open and authenticated\n");
+}
+
+static void close_session() {
+  CK_RV rv = p11->C_Logout(session);
+  assert(rv == CKR_OK);
+
+  rv = p11->C_Finalize(NULL);
+  assert(rv == CKR_OK);
+}
+
+static void print_session_state() {
+  CK_SESSION_INFO pInfo;
+  CK_RV rv = p11->C_GetSessionInfo(session, &pInfo);
+  assert(rv == CKR_OK);
+  CK_STATE state = pInfo.state;
+
+  printf("session state: ");
+  switch (state) {
+    case 0:
+      printf("read-only public session\n");
+      break;
+    case 1:
+      printf("read-only user functions\n");
+      break;
+    case 2:
+      printf("read-write public session\n");
+      break;
+    case 3:
+      printf("read-write user functions\n");
+      break;
+    case 4:
+      printf("read-write so functions\n");
+      break;
+    default:
+      printf("unknown state\n");
+      break;
+  }
+}
 
 static void success(const char *message) { printf("%s. OK\n", message); }
 
 static void fail(const char *message) { printf("%s. FAIL!\n", message); }
 
-static void generate_keypair_yh(CK_BYTE *curve, CK_ULONG curve_len,
+static bool destroy_object(CK_OBJECT_HANDLE key) {
+  if ((p11->C_DestroyObject(session, key)) != CKR_OK) {
+    printf("WARN. Failed to destroy object 0x%lx on HSM. FAIL\n", key);
+    return false;
+  }
+  return true;
+}
+
+static void generate_keypair_yh(CK_BYTE *curve,
                                 CK_OBJECT_HANDLE_PTR publicKeyPtr,
                                 CK_OBJECT_HANDLE_PTR privateKeyPtr) {
   CK_MECHANISM mechanism = {CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0};
@@ -68,7 +154,7 @@ static void generate_keypair_yh(CK_BYTE *curve, CK_ULONG curve_len,
                                       {CKA_KEY_TYPE, &key_type,
                                        sizeof(key_type)},
                                       {CKA_LABEL, label, strlen(label)},
-                                      {CKA_EC_PARAMS, curve, curve_len}};
+                                      {CKA_EC_PARAMS, curve, sizeof(curve)}};
 
   CK_ATTRIBUTE privateKeyTemplate[] = {{CKA_CLASS, &privkey_class,
                                         sizeof(privkey_class)},
@@ -413,83 +499,6 @@ static bool test_faulty_ecdh(const char *curve1, const char *curve2,
     return false;
   }
 
-  return true;
-}
-
-/* This checks the same attributes that validate_ecdh_attributes() does but
- * makes sure the input buffer are too small for all of them and then
- * checks that we return the correct values in this case.
- */
-static bool check_attributes_buffer_too_small(CK_OBJECT_HANDLE key_id) {
-  CK_OBJECT_CLASS key_class;
-  CK_KEY_TYPE key_type;
-  CK_BBOOL is_local;
-  CK_BBOOL is_token;
-  CK_BBOOL is_destroyable;
-  CK_BBOOL is_extractable;
-  CK_BBOOL is_never_extractable;
-  CK_BBOOL is_sensitive;
-  CK_BBOOL is_always_sensitive;
-  CK_BBOOL is_modifiable;
-  CK_BBOOL is_copyable;
-  CK_BBOOL is_sign;
-  CK_BBOOL is_sign_recover;
-  CK_BBOOL is_always_authenticated;
-  CK_BBOOL is_unwrap;
-  CK_BBOOL is_wrap;
-  CK_BBOOL is_wrap_with_trusted;
-  CK_BBOOL is_verify;
-  CK_BBOOL is_encrypt;
-  CK_BBOOL is_derive;
-
-  CK_BYTE publicValue[1];
-  char label[1] = {0};
-  size_t label_len = sizeof(label) - 1;
-  CK_BYTE id[1];
-
-  CK_ATTRIBUTE template[] =
-    {{CKA_CLASS, &key_class, sizeof(key_class) - 1},
-     {CKA_ID, &id, sizeof(id) - 1},
-     {CKA_KEY_TYPE, &key_type, sizeof(key_type) - 1},
-     {CKA_LOCAL, &is_local, sizeof(is_local) - 1},
-     {CKA_TOKEN, &is_token, sizeof(is_token) - 1},
-     {CKA_DESTROYABLE, &is_destroyable, sizeof(is_destroyable) - 1},
-     {CKA_EXTRACTABLE, &is_extractable, sizeof(is_extractable) - 1},
-     {CKA_NEVER_EXTRACTABLE, &is_never_extractable,
-      sizeof(is_never_extractable) - 1},
-     {CKA_SENSITIVE, &is_sensitive, sizeof(is_sensitive) - 1},
-     {CKA_ALWAYS_SENSITIVE, &is_always_sensitive,
-      sizeof(is_always_sensitive) - 1},
-     {CKA_MODIFIABLE, &is_modifiable, sizeof(is_modifiable) - 1},
-     {CKA_COPYABLE, &is_copyable, sizeof(is_copyable) - 1},
-     {CKA_SIGN, &is_sign, sizeof(is_sign) - 1},
-     {CKA_SIGN_RECOVER, &is_sign_recover, sizeof(is_sign_recover) - 1},
-     {CKA_ALWAYS_AUTHENTICATE, &is_always_authenticated,
-      sizeof(is_always_authenticated) - 1},
-     {CKA_UNWRAP, &is_unwrap, sizeof(is_unwrap) - 1},
-     {CKA_WRAP, &is_wrap, sizeof(is_wrap) - 1},
-     {CKA_WRAP_WITH_TRUSTED, &is_wrap_with_trusted,
-      sizeof(is_wrap_with_trusted) - 1},
-     {CKA_VERIFY, &is_verify, sizeof(is_verify) - 1},
-     {CKA_ENCRYPT, &is_encrypt, sizeof(is_encrypt) - 1},
-     {CKA_DERIVE, &is_derive, sizeof(is_derive) - 1},
-     {CKA_VALUE, &publicValue, sizeof(publicValue) - 1},
-     {CKA_LABEL, label, label_len}};
-
-  CK_ULONG attribute_count = 23;
-
-  CK_RV rv =
-    p11->C_GetAttributeValue(session, key_id, template, attribute_count);
-  if (rv != CKR_BUFFER_TOO_SMALL) {
-    fail("Should have returned buffer too small!");
-    return false;
-  }
-  for (CK_ULONG i = 0; i < attribute_count; ++i) {
-    if (template[i].ulValueLen != CK_UNAVAILABLE_INFORMATION) {
-      fail("ulValueLen should be CK_UNAVAILABLE_INFORMATION.");
-      return false;
-    }
-  }
   return true;
 }
 
@@ -840,20 +849,19 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
-  void *handle = open_module(argv[1]);
-  p11 = get_function_list(handle);
-  session = open_session(p11);
-  print_session_state(p11, session);
+  get_function_list(argv);
+  open_session();
+  print_session_state();
 
   int exit_status = EXIT_SUCCESS;
 
   CK_OBJECT_HANDLE yh_pubkey, yh_privkey;
+
   for (int i = 0; i < CURVE_COUNT; i++) {
 
     printf("\n/////// Testing curve %s\n", CURVES[i]);
 
-    generate_keypair_yh(CURVE_PARAMS[i], CURVE_LENS[i], &yh_pubkey,
-                        &yh_privkey);
+    generate_keypair_yh(CURVE_PARAMS[i], &yh_pubkey, &yh_privkey);
     CK_OBJECT_HANDLE ecdh1, ecdh2, ecdh3;
 
     printf("Testing the value of ECDH key derived by yubihsm-pkcs11... ");
@@ -876,8 +884,7 @@ int main(int argc, char **argv) {
     }
 
     printf("Testing deriving ECDH keys with faulty parameters... ");
-    if (test_faulty_ecdh(CURVES[i], i == 0 ? CURVES[i + 1] : CURVES[i - 1],
-                         &yh_privkey, &ecdh1)) {
+    if (test_faulty_ecdh(CURVES[i], "prime256v1", &yh_privkey, &ecdh1)) {
       printf("OK!\n");
     } else {
       printf("FAIL!\n");
@@ -887,15 +894,6 @@ int main(int argc, char **argv) {
 
     printf("Validating ECDH attributes... ");
     if (validate_ecdh_attributes(ecdh1, "ecdh1")) {
-      printf("OK!\n");
-    } else {
-      printf("FAIL!\n");
-      exit_status = EXIT_FAILURE;
-      goto c_clean;
-    }
-
-    printf("Validating ECDH attributes... but with too small buffers...");
-    if (check_attributes_buffer_too_small(ecdh1)) {
       printf("OK!\n");
     } else {
       printf("FAIL!\n");
@@ -989,7 +987,7 @@ int main(int argc, char **argv) {
     // ------- End C_FindObjects functions test
 
     printf("Destroying ECDH key 1... ");
-    destroy_object(p11, session, ecdh1);
+    destroy_object(ecdh1);
     if (find_secret_extractable_keys(&ecdh1, &ecdh2, &ecdh3, 2)) {
       printf("OK!\n");
     } else {
@@ -999,7 +997,7 @@ int main(int argc, char **argv) {
     }
 
     printf("Destroying ECDH key 2... ");
-    destroy_object(p11, session, ecdh3);
+    destroy_object(ecdh3);
     if (find_secret_extractable_keys(&ecdh1, &ecdh2, &ecdh3, 1)) {
       printf("OK!\n");
     } else {
@@ -1027,7 +1025,7 @@ int main(int argc, char **argv) {
     }
 
     printf("Destroying ECDH key 3... ");
-    destroy_object(p11, session, ecdh2);
+    destroy_object(ecdh2);
     if (find_secret_extractable_keys(&ecdh1, &ecdh2, &ecdh3, 0)) {
       printf("OK!\n");
     } else {
@@ -1036,14 +1034,13 @@ int main(int argc, char **argv) {
       goto c_clean;
     }
 
-    destroy_object(p11, session, yh_privkey);
+    destroy_object(yh_privkey);
   }
 
 c_clean:
   if (exit_status == EXIT_FAILURE) {
-    destroy_object(p11, session, yh_privkey);
+    destroy_object(yh_privkey);
   }
-  close_session(p11, session);
-  close_module(handle);
+  close_session();
   return (exit_status);
 }

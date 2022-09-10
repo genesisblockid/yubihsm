@@ -46,11 +46,6 @@ void list_destroy(List *list) {
     free(current->data);
     free(current);
   }
-  list->length = 0;
-  list->item_size = 0;
-  list->head = NULL;
-  list->tail = NULL;
-  list->free_item_fn = NULL;
 }
 
 bool list_prepend(List *list, void *item) {
@@ -108,6 +103,7 @@ bool list_append(List *list, void *item) {
 }
 
 ListItem *list_get(List *list, void *data, CompareItemFn compare_item_fn) {
+
   for (ListItem *item = list->head; item != NULL; item = item->next) {
     if (compare_item_fn(data, item->data) == true) {
 
@@ -177,6 +173,7 @@ void list_delete(List *list, ListItem *item) {
 }
 
 void list_iterate(List *list, IteratorFn iterator_fn) {
+
   for (ListItem *item = list->head; item != NULL; item = item->next) {
     iterator_fn(item->data);
   }

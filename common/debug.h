@@ -17,12 +17,8 @@
 #ifndef DEBUG_H
 #define DEBUG_H
 
-#include "../common/platform-config.h"
-#include "time_win.h"
-
-#ifdef _MSVC
-#include <winsock.h>
-#endif
+#include <sys/time.h>
+#include <time.h>
 
 #ifdef __linux__
 #define ANSI_RED "\x1b[31m"
@@ -45,10 +41,6 @@
 #define __FILENAME__                                                           \
   (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 
-#ifdef _MSVC
-#define localtime_r(a, b) localtime_s(b, a)
-#endif
-
 #define D(var, file, col, who, lev, ...)                                       \
   if (var) {                                                                   \
     struct timeval _tv;                                                        \
@@ -67,8 +59,8 @@
 
 #define DLN(var, file, col, who, lev, ...)                                     \
   if (var) {                                                                   \
-    D(var, file != NULL ? file : stderr, col, who, lev, __VA_ARGS__);          \
-    fprintf(file != NULL ? file : stderr, "\n");                               \
+    D(var, file, col, who, lev, __VA_ARGS__);                                  \
+    fprintf(file, "\n");                                                       \
   }
 
 #endif

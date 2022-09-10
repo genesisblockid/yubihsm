@@ -58,7 +58,10 @@ int main(void) {
   assert(yrc == YHR_SUCCESS);
 
   yrc = yh_create_session_derived(connector, authkey, password1,
-                                  sizeof(password1) - 1, false, &session);
+                                  sizeof(password1), false, &session);
+  assert(yrc == YHR_SUCCESS);
+
+  yrc = yh_authenticate_session(session);
   assert(yrc == YHR_SUCCESS);
 
   uint8_t session_id;
@@ -95,7 +98,10 @@ int main(void) {
   printf("Closed session %02d\n", session_id);
 
   yrc = yh_create_session_derived(connector, key_id, password2,
-                                  sizeof(password2) - 1, false, &session);
+                                  sizeof(password2), false, &session);
+  assert(yrc == YHR_SUCCESS);
+
+  yrc = yh_authenticate_session(session);
   assert(yrc == YHR_SUCCESS);
 
   yrc = yh_get_session_id(session, &session_id);
@@ -105,23 +111,10 @@ int main(void) {
          "%04x\n",
          session_id, key_id);
 
-  printf("Trying to get log entries\n");
-
-  uint16_t unlogged_boot, unlogged_auth;
-  yh_log_entry logs[YH_MAX_LOG_ENTRIES];
-  size_t n_items = sizeof(logs) / sizeof(yh_log_entry);
-
-  yrc = yh_util_get_log_entries(session, &unlogged_boot, &unlogged_auth, logs,
-                                &n_items);
-  assert(yrc == YHR_SUCCESS);
-
-  printf("Got %zu log entries: %s\n", n_items, yh_strerror(yrc));
-
   printf("Trying to get 16 bytes of random data\n");
 
   uint8_t data[16];
   size_t data_len = sizeof(data);
-
   yrc = yh_util_get_pseudo_random(session, 16, data, &data_len);
   assert(yrc == YHR_DEVICE_INSUFFICIENT_PERMISSIONS);
 

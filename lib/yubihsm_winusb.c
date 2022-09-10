@@ -252,7 +252,6 @@ out:
 }
 
 yh_backend *backend_create(void) {
-  DBG_INFO("backend_create");
   yh_backend *backend = calloc(1, sizeof(yh_backend));
   return backend;
 }
@@ -270,7 +269,6 @@ void usb_close(yh_backend *state) {
 
 void usb_destroy(yh_backend **state) {
   if (state && *state) {
-    usb_close(*state);
     free(*state);
     *state = NULL;
   }

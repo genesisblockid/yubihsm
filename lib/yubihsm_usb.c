@@ -16,7 +16,6 @@
 
 #include <stdint.h>
 #include <string.h>
-#include "../common/platform-config.h"
 #ifdef __WIN32
 #include <winsock.h>
 #else
@@ -28,10 +27,8 @@
 #include "yubihsm_usb.h"
 #include "debug_lib.h"
 
-#ifndef STATIC
 uint8_t YH_INTERNAL _yh_verbosity;
 FILE YH_INTERNAL *_yh_output;
-#endif
 
 static void backend_set_verbosity(uint8_t verbosity, FILE *output) {
   _yh_verbosity = verbosity;
@@ -39,13 +36,11 @@ static void backend_set_verbosity(uint8_t verbosity, FILE *output) {
 }
 
 static yh_rc backend_init(uint8_t verbosity, FILE *output) {
-  DBG_INFO("backend_init");
   backend_set_verbosity(verbosity, output);
   return YHR_SUCCESS;
 }
 
 static yh_rc backend_connect(yh_connector *connector, int timeout) {
-  DBG_INFO("backend_connect");
   unsigned long serial = 0;
 
   yh_rc ret = YHR_CONNECTOR_ERROR;
@@ -72,17 +67,14 @@ out:
 }
 
 static void backend_disconnect(yh_backend *connection) {
-  DBG_INFO("backend_disconnect");
   usb_destroy(&connection);
 }
 
-static yh_rc backend_send_msg(yh_backend *connection, Msg *msg, Msg *response,
-                              const char *identifier) {
-  int32_t trf_len = ntohs(msg->st.len) + 3;
+static yh_rc backend_send_msg(yh_backend *connection, Msg *msg, Msg *response) {
+  int32_t trf_len = msg->st.len + 3;
   yh_rc ret = YHR_GENERIC_ERROR;
-  unsigned long read_len = 0;
-
-  (void) identifier;
+  unsigned long read_len;
+  msg->st.len = htons(msg->st.len);
 
   for (int i = 0; i <= 1; i++) {
     if (ret != YHR_GENERIC_ERROR) {
@@ -99,7 +91,7 @@ static yh_rc backend_send_msg(yh_backend *connection, Msg *msg, Msg *response,
       continue;
     }
 
-    read_len = sizeof(response->raw);
+    read_len = SCP_MSG_BUF_SIZE;
     if (usb_read(connection, response->raw, &read_len) == 0) {
       ret = YHR_CONNECTION_ERROR;
       DBG_ERR("USB read failed");
@@ -118,16 +110,17 @@ static yh_rc backend_send_msg(yh_backend *connection, Msg *msg, Msg *response,
     return YHR_WRONG_LENGTH;
   }
 
-  if (ntohs(response->st.len) != read_len - 3) {
-    DBG_ERR("Wrong length received, %d vs %lu", ntohs(response->st.len),
-            read_len);
+  response->st.len = ntohs(response->st.len);
+
+  if (response->st.len != read_len - 3) {
+    DBG_ERR("Wrong length received, %d vs %lu", response->st.len, read_len);
     return YHR_WRONG_LENGTH;
   }
 
   return YHR_SUCCESS;
 }
 
-static void backend_cleanup(void) { DBG_INFO("backend_cleanup"); }
+static void backend_cleanup(void) {}
 
 static yh_rc backend_option(yh_backend *connection, yh_connector_option opt,
                             const void *val) {
